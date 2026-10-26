@@ -1,11 +1,9 @@
-from babyai.safety.rules import RiskLevel
 from babyai.tools.base import Tool, ToolResult
 
 
 class AskUserTool(Tool):
     name = "ask_user"
-    description = "Ask the user for clarification or more input."
-    risk_level = RiskLevel.LOW
+    description = "Ask the user a clarifying question."
 
     def invoke(self, question: str) -> ToolResult:
         return ToolResult(True, question, {"question": question})
@@ -13,8 +11,7 @@ class AskUserTool(Tool):
 
 class NotifyTool(Tool):
     name = "notify"
-    description = "Send a short user-visible notification."
-    risk_level = RiskLevel.LOW
+    description = "Show a short notification to the user."
 
     def invoke(self, message: str, title: str = "BabyAI") -> ToolResult:
         return ToolResult(True, f"{title}: {message}", {"message": message, "title": title})

@@ -34,18 +34,16 @@ class ToolRegistry:
 
     def call(self, name: str, arguments: dict[str, Any] | None = None, interactive: bool = True, user_confirmation: bool | None = None) -> Any:
         tool = self.get(name)
-        if not tool:
+        if tool is None:
             return {"ok": False, "content": f"Unknown tool: {name}"}
-        args = arguments or {}
-        if user_confirmation is not None:
-            if not user_confirmation:
-                return {"ok": False, "content": f"User rejected {name}."}
-        return tool.invoke(**args)
+        if user_confirmation is not None and not user_confirmation:
+            return {"ok": False, "content": f"User rejected {name}."}
+        return tool.invoke(**(arguments or {}))
 
 
 def build_default_registry(memory_store=None, config: dict[str, Any] | None = None) -> ToolRegistry:
     registry = ToolRegistry()
-    tool_instances = [
+    tools = [
         ReadFileTool(memory_store, config),
         WriteFileTool(memory_store, config),
         EditFileTool(memory_store, config),
@@ -68,6 +66,6 @@ def build_default_registry(memory_store=None, config: dict[str, Any] | None = No
         GetClipboardTool(memory_store, config),
         SetClipboardTool(memory_store, config),
     ]
-    for tool in tool_instances:
+    for tool in tools:
         registry.register(tool)
     return registry

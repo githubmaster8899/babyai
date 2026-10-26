@@ -1,6 +1,6 @@
 import unittest
 
-from babyai.tools.registry import ToolRegistry, build_default_registry
+from babyai.tools.registry import build_default_registry
 
 
 class ToolRegistryTests(unittest.TestCase):

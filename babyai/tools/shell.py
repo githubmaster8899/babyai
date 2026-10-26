@@ -1,106 +1,50 @@
-import glob
 import os
-from pathlib import Path
+import platform
 
 from babyai.tools.base import Tool, ToolResult
-from babyai.safety.rules import RiskLevel
 
 
-class ReadFileTool(Tool):
-    name = "read_file"
-    description = "Read the contents of a file from disk."
-    risk_level = RiskLevel.LOW
+class GetSystemInfoTool(Tool):
+    name = "get_system_info"
+    description = "Return basic system information for the current machine."
 
-    def invoke(self, path: str, offset: int = 0, limit: int | None = None) -> ToolResult:
+    def invoke(self) -> ToolResult:
+        info = {
+            "platform": platform.platform(),
+            "system": platform.system(),
+            "release": platform.release(),
+            "python_version": platform.python_version(),
+            "cwd": os.getcwd(),
+        }
+        return ToolResult(True, str(info), info)
+
+
+class ManageProcessesTool(Tool):
+    name = "manage_processes"
+    description = "List or terminate processes when explicitly approved."
+
+    def invoke(self, action: str = "list", pid: int | None = None, signal: str = "SIGTERM") -> ToolResult:
         try:
-            data = Path(path).read_text(encoding="utf-8")
-            lines = data.splitlines()
-            if offset:
-                lines = lines[offset:]
-            if limit is not None:
-                lines = lines[:limit]
-            return ToolResult(True, "\n".join(lines), {"path": path})
-        except Exception as exc:
-            return ToolResult(False, f"Failed to read {path}: {exc}")
+            import psutil
+        except Exception:
+            return ToolResult(False, "Process management is unavailable because psutil is not installed.")
 
-
-class WriteFileTool(Tool):
-    name = "write_file"
-    description = "Write or create a file on disk."
-    risk_level = RiskLevel.MEDIUM
-
-    def invoke(self, path: str, content: str) -> ToolResult:
-        try:
-            target = Path(path)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
-            return ToolResult(True, f"Wrote file: {path}", {"path": path})
-        except Exception as exc:
-            return ToolResult(False, f"Failed to write {path}: {exc}")
-
-
-class EditFileTool(Tool):
-    name = "edit_file"
-    description = "Replace a string in an existing file."
-    risk_level = RiskLevel.MEDIUM
-
-    def invoke(self, path: str, old: str, new: str) -> ToolResult:
-        try:
-            target = Path(path)
-            text = target.read_text(encoding="utf-8")
-            if old not in text:
-                return ToolResult(False, f"Pattern not found in {path}")
-            updated = text.replace(old, new)
-            target.write_text(updated, encoding="utf-8")
-            return ToolResult(True, f"Updated file: {path}", {"path": path})
-        except Exception as exc:
-            return ToolResult(False, f"Failed to edit {path}: {exc}")
-
-
-class ListDirectoryTool(Tool):
-    name = "list_directory"
-    description = "List the contents of a directory."
-    risk_level = RiskLevel.LOW
-
-    def invoke(self, path: str = ".") -> ToolResult:
-        try:
-            entries = sorted(os.listdir(path))
-            return ToolResult(True, "\n".join(entries), {"path": path, "entries": entries})
-        except Exception as exc:
-            return ToolResult(False, f"Failed to list {path}: {exc}")
-
-
-class FindFilesTool(Tool):
-    name = "find_files"
-    description = "Find files matching a glob pattern."
-    risk_level = RiskLevel.LOW
-
-    def invoke(self, pattern: str, root: str = ".") -> ToolResult:
-        try:
-            matches = sorted(glob.glob(os.path.join(root, pattern), recursive=True))
-            return ToolResult(True, "\n".join(matches), {"pattern": pattern, "root": root, "matches": matches})
-        except Exception as exc:
-            return ToolResult(False, f"Failed to find files: {exc}")
-
-
-class SearchFilesTool(Tool):
-    name = "search_files"
-    description = "Search text content inside files using a keyword or regex-like pattern."
-    risk_level = RiskLevel.LOW
-
-    def invoke(self, query: str, root: str = ".", file_pattern: str = "*") -> ToolResult:
-        try:
-            matches: list[str] = []
-            for path in Path(root).rglob(file_pattern):
-                if not path.is_file():
-                    continue
+        if action == "list":
+            processes = []
+            for proc in psutil.process_iter(["pid", "name", "status"]):
                 try:
-                    text = path.read_text(encoding="utf-8")
-                except Exception:
+                    processes.append({
+                        "pid": proc.info["pid"],
+                        "name": proc.info["name"],
+                        "status": proc.info["status"],
+                    })
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
-                for line_number, line in enumerate(text.splitlines(), start=1):
-                    if query.lower() in line.lower():
-                        matches.append(f"{path}:{line_number}:{line.strip()}")
-            return ToolResult(True, "\n".join(matches[:100]), {"query": query, "matches": matches[:100]})
-        except Exception as exc:
-            return ToolResult(False, f"Failed to search files: {exc}")
+            return ToolResult(True, str(processes[:20]), {"processes": processes[:20]})
+
+        if action == "kill" and pid is not None:
+            proc = psutil.Process(pid)
+            proc.terminate()
+            return ToolResult(True, f"Terminated process {pid}", {"pid": pid})
+
+        return ToolResult(False, "Unsupported process action.")

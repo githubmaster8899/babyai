@@ -1,151 +1,89 @@
-import os
-import sqlite3
+import json
 from typing import Any
 
-
-def ensure_parent_dir(path: str) -> str:
-    normalized = os.path.expanduser(path)
-    parent = os.path.dirname(normalized)
-    if parent and not os.path.exists(parent):
-        os.makedirs(parent, exist_ok=True)
-    return normalized
-
-
-def normalize_db_path(path: str) -> str:
-    return ensure_parent_dir(os.path.expanduser(path))
+from babyai.agent.context import ConversationContext
+from babyai.agent.prompts import DEFAULT_SYSTEM_PROMPT
+from babyai.config.loader import load_config
+from babyai.llm.client import LLMClient
+from babyai.memory.store import MemoryStore
+from babyai.safety.gate import SafetyGate
+from babyai.tools.registry import build_default_registry
 
 
-class SQLiteMemoryDB:
-    def __init__(self, db_path: str):
-        self.db_path = normalize_db_path(db_path)
-        self.connection = sqlite3.connect(self.db_path)
-        self.connection.row_factory = sqlite3.Row
-        self._initialize()
+class BabyAI:
+    def __init__(self, config_path: str = "config.toml", voice_enabled: bool = False):
+        self.config = load_config(config_path)
+        self.voice_enabled = voice_enabled or bool(self.config.get("voice", {}).get("enabled", False))
 
-    def _initialize(self) -> None:
-        self.connection.execute("PRAGMA journal_mode=WAL;")
-        self.connection.execute("PRAGMA foreign_keys=ON;")
-        self.connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS facts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                fact TEXT NOT NULL,
-                source TEXT,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-            )
-            """
+        memory_path = self.config.get("memory", {}).get("db_path", "~/.local/share/babyai/memory.db")
+        self.memory = MemoryStore(memory_path)
+        self.safety_gate = SafetyGate(level=self.config.get("safety", {}).get("level", "strict"))
+        self.context = ConversationContext(self.config.get("agent", {}).get("system_prompt", DEFAULT_SYSTEM_PROMPT))
+        self.tool_registry = build_default_registry(memory_store=self.memory, config=self.config)
+
+        llm_cfg = self.config.get("llm", {})
+        self.llm_client = LLMClient(
+            base_url=llm_cfg.get("base_url", "http://localhost:11434/v1"),
+            model=llm_cfg.get("model", "llama-3.1-8b"),
+            api_key=llm_cfg.get("api_key", ""),
         )
-        self.connection.execute(
-            """
-            CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
-                fact,
-                content='facts',
-                content_rowid='id',
-                tokenize='porter unicode61'
-            )
-            """
-        )
-        self.connection.execute(
-            """
-            CREATE TRIGGER IF NOT EXISTS facts_ai AFTER INSERT ON facts
-            BEGIN
-                INSERT INTO facts_fts(rowid, fact) VALUES (new.id, new.fact);
-            END
-            """
-        )
-        self.connection.execute(
-            """
-            CREATE TRIGGER IF NOT EXISTS facts_ad AFTER DELETE ON facts
-            BEGIN
-                INSERT INTO facts_fts(facts_fts, rowid, fact) VALUES ('delete', old.id, old.fact);
-            END
-            """
-        )
-        self.connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS conversations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT,
-                role TEXT,
-                content TEXT NOT NULL,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-        self.connection.execute(
-            """
-            CREATE VIRTUAL TABLE IF NOT EXISTS conversations_fts USING fts5(
-                content,
-                content='conversations',
-                content_rowid='id',
-                tokenize='porter unicode61'
-            )
-            """
-        )
-        self.connection.execute(
-            """
-            CREATE TRIGGER IF NOT EXISTS conversations_ai AFTER INSERT ON conversations
-            BEGIN
-                INSERT INTO conversations_fts(rowid, content) VALUES (new.id, new.content);
-            END
-            """
-        )
-        self.connection.execute(
-            """
-            CREATE TRIGGER IF NOT EXISTS conversations_ad AFTER DELETE ON conversations
-            BEGIN
-                INSERT INTO conversations_fts(conversations_fts, rowid, content) VALUES ('delete', old.id, old.content);
-            END
-            """
-        )
-        self.connection.commit()
 
-    def close(self) -> None:
-        self.connection.close()
+    def run_cli(self) -> None:
+        print("BabyAI starting. Type 'exit' to quit.")
+        while True:
+            try:
+                user_input = input("You> ")
+            except EOFError:
+                print()
+                break
+            if user_input.strip().lower() in {"exit", "quit", "bye"}:
+                print("BabyAI: Goodbye.")
+                break
+            response = self.process_user_input(user_input)
+            print(response)
 
-    def insert_fact(self, fact: str, source: str | None = None) -> int:
-        cursor = self.connection.execute(
-            "INSERT INTO facts (fact, source) VALUES (?, ?)",
-            (fact, source),
-        )
-        self.connection.commit()
-        return int(cursor.lastrowid)
+    def process_user_input(self, user_input: str) -> str:
+        self.context.add_user_message(user_input)
+        messages = self.context.build_messages()
+        tool_schemas = self.tool_registry.get_openai_tools()
 
-    def search_facts(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
-        sql = """
-            SELECT f.id, f.fact, f.source, f.created_at
-            FROM facts f
-            JOIN facts_fts ft ON ft.rowid = f.id
-            WHERE facts_fts MATCH ?
-            ORDER BY bm25(facts_fts) LIMIT ?
-        """
-        rows = self.connection.execute(sql, (query, limit)).fetchall()
-        return [dict(row) for row in rows]
+        try:
+            result = self.llm_client.complete(messages=messages, tools=tool_schemas, stream=False)
+        except Exception as exc:
+            fallback = self._fallback_response(user_input)
+            self.context.add_assistant_message(fallback)
+            return fallback
 
-    def delete_fact(self, fact_id: int) -> None:
-        self.connection.execute("DELETE FROM facts WHERE id = ?", (fact_id,))
-        self.connection.commit()
+        message = result.get("choices", [{}])[0].get("message", {})
+        tool_calls = message.get("tool_calls") or []
 
-    def add_conversation(self, session_id: str, role: str, content: str) -> int:
-        cursor = self.connection.execute(
-            "INSERT INTO conversations (session_id, role, content) VALUES (?, ?, ?)",
-            (session_id, role, content),
-        )
-        self.connection.commit()
-        return int(cursor.lastrowid)
+        if tool_calls:
+            outputs: list[str] = []
+            for call in tool_calls:
+                func = call.get("function", {})
+                name = func.get("name")
+                args = func.get("arguments", "")
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except json.JSONDecodeError:
+                        args = {}
+                tool_result = self.tool_registry.call(name=name, arguments=args, interactive=True)
+                outputs.append(f"{name}: {tool_result.content if hasattr(tool_result, 'content') else str(tool_result)}")
+            assistant_reply = "\n".join(outputs)
+            self.context.add_assistant_message(assistant_reply)
+            return assistant_reply
 
-    def search_conversations(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
-        sql = """
-            SELECT c.id, c.session_id, c.role, c.content, c.created_at
-            FROM conversations c
-            JOIN conversations_fts ft ON ft.rowid = c.id
-            WHERE conversations_fts MATCH ?
-            ORDER BY bm25(conversations_fts) LIMIT ?
-        """
-        rows = self.connection.execute(sql, (query, limit)).fetchall()
-        return [dict(row) for row in rows]
+        content = message.get("content") or "I’m here and ready to help."
+        self.context.add_assistant_message(content)
+        return content
 
-    def search_all(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
-        results = self.search_facts(query, limit=limit)
-        results.extend(self.search_conversations(query, limit=limit))
-        return results
+    def _fallback_response(self, user_input: str) -> str:
+        lowered = user_input.lower()
+        if "hello" in lowered or "hi" in lowered:
+            return "Hello! I am BabyAI, running in text-only mode."
+        if "remember" in lowered or "memory" in lowered:
+            return "I can remember facts and search my local SQLite memory store."
+        if "list" in lowered and "file" in lowered:
+            return "I can list files with the list_directory tool when available."
+        return "I am BabyAI and I am ready to help in text mode."

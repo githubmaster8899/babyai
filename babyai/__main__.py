@@ -1,5 +1,4 @@
 import argparse
-import sys
 
 from babyai.agent.core import BabyAI
 
@@ -16,8 +15,7 @@ def main(argv=None):
     assistant = BabyAI(config_path=args.config, voice_enabled=voice_enabled)
 
     if args.command:
-        response = assistant.process_user_input(args.command)
-        print(response)
+        print(assistant.process_user_input(args.command))
         return 0
 
     assistant.run_cli()

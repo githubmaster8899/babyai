@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
-from typing import Any, Callable
-
-from babyai.safety.rules import RiskLevel
+from typing import Any
 
 
 @dataclass
@@ -17,10 +14,8 @@ class ToolResult:
 class Tool:
     name: str = ""
     description: str = ""
-    risk_level: RiskLevel = RiskLevel.LOW
-    requires_confirmation: bool = False
 
-    def __init__(self, memory_store=None, config: dict[str, Any] | None = None):
+    def __init__(self, memory_store: Any = None, config: dict[str, Any] | None = None):
         self.memory_store = memory_store
         self.config = config or {}
 
@@ -40,6 +35,3 @@ class Tool:
                 },
             },
         }
-
-    def _validate_args(self, **kwargs: Any) -> dict[str, Any]:
-        return kwargs

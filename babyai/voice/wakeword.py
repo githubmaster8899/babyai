@@ -1,10 +1,12 @@
-class TTS:
-    def __init__(self, voice: str = ""):
-        self.voice = voice
+class AudioIO:
+    def __init__(self):
         self.available = False
 
     def is_available(self) -> bool:
         return self.available
 
-    def speak(self, text: str) -> str:
-        return "Text-to-speech is unavailable because optional voice dependencies are not installed."
+    def start(self) -> str:
+        return "Audio I/O is not available because optional voice dependencies are not installed."
+
+    def stop(self) -> str:
+        return "Audio I/O stopped."

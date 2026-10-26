@@ -7,4 +7,4 @@ class SpeechToText:
         return self.available
 
     def transcribe(self, audio_path: str | None = None) -> str:
-        return "Speech-to-text is unavailable because the optional voice dependencies are not installed."
+        return "Speech-to-text is unavailable because optional voice dependencies are not installed."
