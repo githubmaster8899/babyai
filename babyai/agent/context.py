@@ -1,10 +1,4 @@
-from __future__ import annotations
-
-from babyai.config.loader import load_config
-from babyai.llm.client import LLMClient
-from babyai.memory.store import MemoryStore
-from babyai.safety.gate import SafetyGate
-from babyai.tools.registry import build_default_registry
+"""BabyAI agent context and prompt definitions."""
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are BabyAI, a local-first, privacy-focused AI assistant. "
