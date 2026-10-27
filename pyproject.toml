@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "babyai"
+version = "0.1.0"
+description = "Local-first, privacy-focused voice-driven AI assistant"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [{ name = "GitHubmaster8899" }]
+keywords = ["ai", "assistant", "voice", "local", "privacy"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+
+[project.optional-dependencies]
+voice = [
+  "openwakeword",
+  "faster-whisper",
+  "piper-tts",
+  "sounddevice",
+  "pyaudio",
+]
+web = [
+  "httpx",
+  "requests",
+]
+all = [
+  "openwakeword",
+  "faster-whisper",
+  "piper-tts",
+  "sounddevice",
+  "pyaudio",
+  "httpx",
+  "requests",
+]
+
+[project.scripts]
+babyai = "babyai.__main__:main"
+
+[tool.setuptools]
+packages = [
+  "babyai",
+  "babyai.agent",
+  "babyai.config",
+  "babyai.llm",
+  "babyai.memory",
+  "babyai.safety",
+  "babyai.tools",
+  "babyai.ui",
+  "babyai.utils",
+  "babyai.voice",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
