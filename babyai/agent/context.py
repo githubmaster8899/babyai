@@ -1,3 +1,17 @@
+from __future__ import annotations
+
+from babyai.config.loader import load_config
+from babyai.llm.client import LLMClient
+from babyai.memory.store import MemoryStore
+from babyai.safety.gate import SafetyGate
+from babyai.tools.registry import build_default_registry
+
+DEFAULT_SYSTEM_PROMPT = (
+    "You are BabyAI, a local-first, privacy-focused AI assistant. "
+    "Answer concisely and safely, prefer text-based help, and use tools when needed."
+)
+
+
 class ConversationContext:
     def __init__(self, system_prompt: str = DEFAULT_SYSTEM_PROMPT):
         self.system_prompt = system_prompt
@@ -16,9 +30,3 @@ class ConversationContext:
 
     def reset(self) -> None:
         self.history.clear()
-
-
-DEFAULT_SYSTEM_PROMPT = (
-    "You are BabyAI, a local-first, privacy-focused AI assistant. "
-    "Answer concisely and safely, prefer text-based help, and use tools when needed."
-)
