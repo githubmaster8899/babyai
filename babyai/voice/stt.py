@@ -1,10 +1,10 @@
-class WakeWordDetector:
-    def __init__(self, wakeword: str = "baby"):
-        self.wakeword = wakeword
+class SpeechToText:
+    def __init__(self, model: str = "base"):
+        self.model = model
         self.available = False
 
     def is_available(self) -> bool:
         return self.available
 
-    def listen(self) -> bool:
-        return False
+    def transcribe(self, audio_path: str | None = None) -> str:
+        return "Speech-to-text is unavailable because optional voice dependencies are not installed."

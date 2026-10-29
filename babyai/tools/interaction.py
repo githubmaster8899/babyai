@@ -1,34 +1,17 @@
 from babyai.tools.base import Tool, ToolResult
 
 
-class RememberFactTool(Tool):
-    name = "remember_fact"
-    description = "Store a fact in the long-term memory database."
+class AskUserTool(Tool):
+    name = "ask_user"
+    description = "Ask the user a clarifying question."
 
-    def invoke(self, fact: str, source: str = "user") -> ToolResult:
-        if not self.memory_store:
-            return ToolResult(False, "Memory store is not configured.")
-        result = self.memory_store.remember_fact(fact, source)
-        return ToolResult(True, f"Remembered: {fact}", result)
+    def invoke(self, question: str) -> ToolResult:
+        return ToolResult(True, question, {"question": question})
 
 
-class RecallMemoryTool(Tool):
-    name = "recall_memory"
-    description = "Search memory for facts and previous conversations."
+class NotifyTool(Tool):
+    name = "notify"
+    description = "Show a short notification to the user."
 
-    def invoke(self, query: str, limit: int = 5) -> ToolResult:
-        if not self.memory_store:
-            return ToolResult(False, "Memory store is not configured.")
-        results = self.memory_store.search_memory(query, limit=limit)
-        return ToolResult(True, str(results), {"results": results})
-
-
-class ForgetMemoryTool(Tool):
-    name = "forget_memory"
-    description = "Delete relevant memory entries by query."
-
-    def invoke(self, query: str) -> ToolResult:
-        if not self.memory_store:
-            return ToolResult(False, "Memory store is not configured.")
-        deleted = self.memory_store.forget_memory(query=query)
-        return ToolResult(True, f"Removed {deleted} memory entries.", {"deleted": deleted})
+    def invoke(self, message: str, title: str = "BabyAI") -> ToolResult:
+        return ToolResult(True, f"{title}: {message}", {"message": message, "title": title})

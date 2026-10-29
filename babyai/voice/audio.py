@@ -1,6 +1,12 @@
-from .audio import AudioIO
-from .stt import SpeechToText
-from .tts import TTS
-from .wakeword import WakeWordDetector
+class AudioIO:
+    def __init__(self):
+        self.available = False
 
-__all__ = ["AudioIO", "SpeechToText", "TTS", "WakeWordDetector"]
+    def is_available(self) -> bool:
+        return self.available
+
+    def start(self) -> str:
+        return "Audio I/O is not available because optional voice dependencies are not installed."
+
+    def stop(self) -> str:
+        return "Audio I/O stopped."

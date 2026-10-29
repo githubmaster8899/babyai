@@ -1,3 +1,3 @@
-from .store import MemoryStore
+from .db import MemoryStore
 
 __all__ = ["MemoryStore"]

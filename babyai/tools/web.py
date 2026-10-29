@@ -1,30 +1,37 @@
-import subprocess
+import re
+from urllib import request
 
 from babyai.tools.base import Tool, ToolResult
 
 
-class RunShellTool(Tool):
-    name = "run_shell"
-    description = "Execute a shell command after safety checks."
+class WebSearchTool(Tool):
+    name = "web_search"
+    description = "Search public web pages for a query."
 
-    def invoke(self, command: str, timeout: int = 30, shell: bool = True) -> ToolResult:
-        if "rm -rf /" in command.lower() or "mkfs" in command.lower() or "sudo rm" in command.lower():
-            return ToolResult(False, "Command denied by safety rules.")
+    def invoke(self, query: str, max_results: int = 5) -> ToolResult:
         try:
-            completed = subprocess.run(
-                command,
-                shell=shell,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-            output = (completed.stdout or "") + (completed.stderr or "")
-            return ToolResult(
-                completed.returncode == 0,
-                output.strip() or "Command executed without output.",
-                {"returncode": completed.returncode},
-            )
-        except subprocess.TimeoutExpired:
-            return ToolResult(False, "Command timed out.")
+            url = f"https://duckduckgo.com/html/?q={query.replace(' ', '+')}"
+            with request.urlopen(url, timeout=15) as response:
+                html = response.read().decode("utf-8", errors="ignore")
+            matches = re.findall(r'<a rel="nofollow" class="result-link" href="(.*?)">(.*?)</a>', html)
+            items = [{"url": m[0], "title": re.sub(r"<.*?>", "", m[1])} for m in matches[:max_results]]
+            return ToolResult(True, str(items), {"results": items})
         except Exception as exc:
-            return ToolResult(False, f"Command failed: {exc}")
+            return ToolResult(False, f"Web search failed: {exc}")
+
+
+class FetchURLTool(Tool):
+    name = "fetch_url"
+    description = "Fetch and extract visible text from a URL."
+
+    def invoke(self, url: str) -> ToolResult:
+        try:
+            with request.urlopen(url, timeout=15) as response:
+                html = response.read().decode("utf-8", errors="ignore")
+            text = re.sub(r"<script.*?</script>", " ", html, flags=re.S | re.I)
+            text = re.sub(r"<style.*?</style>", " ", text, flags=re.S | re.I)
+            text = re.sub(r"<[^>]+>", " ", text)
+            text = re.sub(r"\s+", " ", text)
+            return ToolResult(True, text[:5000], {"url": url, "text": text[:5000]})
+        except Exception as exc:
+            return ToolResult(False, f"Fetch failed: {exc}")

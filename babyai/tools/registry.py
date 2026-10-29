@@ -1,41 +1,71 @@
-from babyai.tools.base import Tool, ToolResult
+from __future__ import annotations
+
+from typing import Any
+
+from babyai.tools.base import Tool
+from babyai.tools.filesystem import (
+    EditFileTool,
+    FindFilesTool,
+    ListDirectoryTool,
+    ReadFileTool,
+    SearchFilesTool,
+    WriteFileTool,
+)
+from babyai.tools.interaction import AskUserTool, NotifyTool
+from babyai.tools.memory import ForgetMemoryTool, RecallMemoryTool, RememberFactTool
+from babyai.tools.shell import RunShellTool
+from babyai.tools.system import GetSystemInfoTool, ManageProcessesTool
+from babyai.tools.voice import CaptureScreenTool, GetClipboardTool, ListenTool, SetClipboardTool, SpeakTool
+from babyai.tools.web import FetchURLTool, WebSearchTool
 
 
-class SpeakTool(Tool):
-    name = "speak"
-    description = "Generate speech output if voice mode is available."
+class ToolRegistry:
+    def __init__(self):
+        self.tools: dict[str, Tool] = {}
 
-    def invoke(self, text: str) -> ToolResult:
-        return ToolResult(True, f"Voice output requested: {text}", {"text": text})
+    def register(self, tool: Tool) -> None:
+        self.tools[tool.name] = tool
 
+    def get(self, name: str) -> Tool | None:
+        return self.tools.get(name)
 
-class ListenTool(Tool):
-    name = "listen"
-    description = "Listen to the microphone for speech input when voice mode is enabled."
+    def get_openai_tools(self) -> list[dict[str, Any]]:
+        return [tool.schema() for tool in self.tools.values()]
 
-    def invoke(self, timeout: int = 10) -> ToolResult:
-        return ToolResult(True, "Voice input requested.", {"timeout": timeout})
-
-
-class CaptureScreenTool(Tool):
-    name = "capture_screen"
-    description = "Capture a screenshot from the display. This is a high-risk action."
-
-    def invoke(self, path: str = "screenshot.png") -> ToolResult:
-        return ToolResult(False, "Screen capture is unavailable in this environment.", {"path": path})
+    def call(self, name: str, arguments: dict[str, Any] | None = None, interactive: bool = True, user_confirmation: bool | None = None) -> Any:
+        tool = self.get(name)
+        if tool is None:
+            return {"ok": False, "content": f"Unknown tool: {name}"}
+        if user_confirmation is not None and not user_confirmation:
+            return {"ok": False, "content": f"User rejected {name}."}
+        return tool.invoke(**(arguments or {}))
 
 
-class GetClipboardTool(Tool):
-    name = "get_clipboard"
-    description = "Read clipboard contents."
-
-    def invoke(self) -> ToolResult:
-        return ToolResult(False, "Clipboard access is unavailable in this environment.")
-
-
-class SetClipboardTool(Tool):
-    name = "set_clipboard"
-    description = "Write text to the system clipboard."
-
-    def invoke(self, text: str) -> ToolResult:
-        return ToolResult(False, "Clipboard writing is unavailable in this environment.", {"text": text})
+def build_default_registry(memory_store=None, config: dict[str, Any] | None = None) -> ToolRegistry:
+    registry = ToolRegistry()
+    tools = [
+        ReadFileTool(memory_store, config),
+        WriteFileTool(memory_store, config),
+        EditFileTool(memory_store, config),
+        ListDirectoryTool(memory_store, config),
+        FindFilesTool(memory_store, config),
+        SearchFilesTool(memory_store, config),
+        RunShellTool(memory_store, config),
+        GetSystemInfoTool(memory_store, config),
+        ManageProcessesTool(memory_store, config),
+        WebSearchTool(memory_store, config),
+        FetchURLTool(memory_store, config),
+        RememberFactTool(memory_store, config),
+        RecallMemoryTool(memory_store, config),
+        ForgetMemoryTool(memory_store, config),
+        AskUserTool(memory_store, config),
+        NotifyTool(memory_store, config),
+        SpeakTool(memory_store, config),
+        ListenTool(memory_store, config),
+        CaptureScreenTool(memory_store, config),
+        GetClipboardTool(memory_store, config),
+        SetClipboardTool(memory_store, config),
+    ]
+    for tool in tools:
+        registry.register(tool)
+    return registry
