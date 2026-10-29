@@ -1,10 +1,10 @@
-class SpeechToText:
-    def __init__(self, model: str = "base"):
-        self.model = model
+class TTS:
+    def __init__(self, voice: str = ""):
+        self.voice = voice
         self.available = False
 
     def is_available(self) -> bool:
         return self.available
 
-    def transcribe(self, audio_path: str | None = None) -> str:
-        return "Speech-to-text is unavailable because optional voice dependencies are not installed."
+    def speak(self, text: str) -> str:
+        return "Text-to-speech is unavailable because optional voice dependencies are not installed."

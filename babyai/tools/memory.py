@@ -1,37 +1,34 @@
-import re
-from urllib import request
-
 from babyai.tools.base import Tool, ToolResult
 
 
-class WebSearchTool(Tool):
-    name = "web_search"
-    description = "Search public web pages for a query."
+class RememberFactTool(Tool):
+    name = "remember_fact"
+    description = "Store a fact in the long-term memory database."
 
-    def invoke(self, query: str, max_results: int = 5) -> ToolResult:
-        try:
-            url = f"https://duckduckgo.com/html/?q={query.replace(' ', '+')}"
-            with request.urlopen(url, timeout=15) as response:
-                html = response.read().decode("utf-8", errors="ignore")
-            matches = re.findall(r'<a rel="nofollow" class="result-link" href="(.*?)">(.*?)</a>', html)
-            items = [{"url": m[0], "title": re.sub(r"<.*?>", "", m[1])} for m in matches[:max_results]]
-            return ToolResult(True, str(items), {"results": items})
-        except Exception as exc:
-            return ToolResult(False, f"Web search failed: {exc}")
+    def invoke(self, fact: str, source: str = "user") -> ToolResult:
+        if not self.memory_store:
+            return ToolResult(False, "Memory store is not configured.")
+        result = self.memory_store.remember_fact(fact, source)
+        return ToolResult(True, f"Remembered: {fact}", result)
 
 
-class FetchURLTool(Tool):
-    name = "fetch_url"
-    description = "Fetch and extract visible text from a URL."
+class RecallMemoryTool(Tool):
+    name = "recall_memory"
+    description = "Search memory for facts and previous conversations."
 
-    def invoke(self, url: str) -> ToolResult:
-        try:
-            with request.urlopen(url, timeout=15) as response:
-                html = response.read().decode("utf-8", errors="ignore")
-            text = re.sub(r"<script.*?</script>", " ", html, flags=re.S | re.I)
-            text = re.sub(r"<style.*?</style>", " ", text, flags=re.S | re.I)
-            text = re.sub(r"<[^>]+>", " ", text)
-            text = re.sub(r"\s+", " ", text)
-            return ToolResult(True, text[:5000], {"url": url, "text": text[:5000]})
-        except Exception as exc:
-            return ToolResult(False, f"Fetch failed: {exc}")
+    def invoke(self, query: str, limit: int = 5) -> ToolResult:
+        if not self.memory_store:
+            return ToolResult(False, "Memory store is not configured.")
+        results = self.memory_store.search_memory(query, limit=limit)
+        return ToolResult(True, str(results), {"results": results})
+
+
+class ForgetMemoryTool(Tool):
+    name = "forget_memory"
+    description = "Delete relevant memory entries by query."
+
+    def invoke(self, query: str) -> ToolResult:
+        if not self.memory_store:
+            return ToolResult(False, "Memory store is not configured.")
+        deleted = self.memory_store.forget_memory(query=query)
+        return ToolResult(True, f"Removed {deleted} memory entries.", {"deleted": deleted})

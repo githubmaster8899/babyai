@@ -8,7 +8,7 @@ def main(argv=None):
     parser.add_argument("--config", default="config.toml", help="Path to config.toml")
     parser.add_argument("--voice", action="store_true", help="Enable voice mode if available")
     parser.add_argument("--no-voice", action="store_true", help="Disable voice mode")
-    parser.add_argument("--desktop", action="store_true", help="Launch the desktop demo window")
+    parser.add_argument("--desktop", action="store_true", help="Launch the floating desktop overlay (needs Tk)")
     parser.add_argument("command", nargs="?", help="Run a single text command instead of interactive mode")
     args = parser.parse_args(argv)
 
@@ -17,14 +17,19 @@ def main(argv=None):
 
     if args.desktop:
         try:
-            import tkinter  # noqa: F401
+            import tkinter
             from babyai.ui.app import launch_desktop_ui
         except Exception as exc:
             print(f"Desktop UI unavailable: {exc}")
             print("Falling back to CLI...")
             assistant.run_cli()
             return 0
-        launch_desktop_ui(assistant)
+        try:
+            launch_desktop_ui(assistant)
+        except tkinter.TclError as exc:  # Tk is installed but there is no usable display
+            print(f"Desktop UI could not start: {exc}")
+            print("Falling back to CLI...")
+            assistant.run_cli()
         return 0
 
     if args.command:

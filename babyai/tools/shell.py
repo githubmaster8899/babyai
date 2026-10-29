@@ -1,50 +1,30 @@
-import os
-import platform
+import subprocess
 
 from babyai.tools.base import Tool, ToolResult
 
 
-class GetSystemInfoTool(Tool):
-    name = "get_system_info"
-    description = "Return basic system information for the current machine."
+class RunShellTool(Tool):
+    name = "run_shell"
+    description = "Execute a shell command after safety checks."
 
-    def invoke(self) -> ToolResult:
-        info = {
-            "platform": platform.platform(),
-            "system": platform.system(),
-            "release": platform.release(),
-            "python_version": platform.python_version(),
-            "cwd": os.getcwd(),
-        }
-        return ToolResult(True, str(info), info)
-
-
-class ManageProcessesTool(Tool):
-    name = "manage_processes"
-    description = "List or terminate processes when explicitly approved."
-
-    def invoke(self, action: str = "list", pid: int | None = None, signal: str = "SIGTERM") -> ToolResult:
+    def invoke(self, command: str, timeout: int = 30, shell: bool = True) -> ToolResult:
+        if "rm -rf /" in command.lower() or "mkfs" in command.lower() or "sudo rm" in command.lower():
+            return ToolResult(False, "Command denied by safety rules.")
         try:
-            import psutil
-        except Exception:
-            return ToolResult(False, "Process management is unavailable because psutil is not installed.")
-
-        if action == "list":
-            processes = []
-            for proc in psutil.process_iter(["pid", "name", "status"]):
-                try:
-                    processes.append({
-                        "pid": proc.info["pid"],
-                        "name": proc.info["name"],
-                        "status": proc.info["status"],
-                    })
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    continue
-            return ToolResult(True, str(processes[:20]), {"processes": processes[:20]})
-
-        if action == "kill" and pid is not None:
-            proc = psutil.Process(pid)
-            proc.terminate()
-            return ToolResult(True, f"Terminated process {pid}", {"pid": pid})
-
-        return ToolResult(False, "Unsupported process action.")
+            completed = subprocess.run(
+                command,
+                shell=shell,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            output = (completed.stdout or "") + (completed.stderr or "")
+            return ToolResult(
+                completed.returncode == 0,
+                output.strip() or "Command executed without output.",
+                {"returncode": completed.returncode},
+            )
+        except subprocess.TimeoutExpired:
+            return ToolResult(False, "Command timed out.")
+        except Exception as exc:
+            return ToolResult(False, f"Command failed: {exc}")
