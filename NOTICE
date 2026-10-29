@@ -1,0 +1,11 @@
+BabyAI is licensed under the MIT License (see LICENSE), EXCEPT for the
+contents of the capri/ directory.
+
+capri/ is a copy of Capri (https://github.com/lachydotmcg/capri-desktop,
+imported from upstream commit 72d6b8374905689d8d49736079f322c9429bd52e).
+It is licensed under the PolyForm Noncommercial License 1.0.0 (see
+capri/LICENSE.md), not MIT. It may be used, changed and shared for
+noncommercial purposes only, and any copy you share must keep
+capri/LICENSE.md and the notice below.
+
+Required Notice: Copyright 2026 Lachy (https://github.com/lachydotmcg)

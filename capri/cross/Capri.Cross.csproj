@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>Capri</AssemblyName>
+    <RootNamespace>CapriDesktop</RootNamespace>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <DefineConstants>$(DefineConstants);CROSS</DefineConstants>
+    <NoWarn>$(NoWarn);CS0649;CS0169;CS0414;CA1416;SYSLIB0014</NoWarn>
+    <Version>0.7.4</Version>
+    <Product>Capri</Product>
+    <ApplicationIcon>../assets/chip.ico</ApplicationIcon>
+    <BuiltInComInteropSupport>false</BuiltInComInteropSupport>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="11.3.22" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.3.22" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.22" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../app/Brain.cs" Link="Shared/Brain.cs" />
+    <Compile Include="../app/Engine.cs" Link="Shared/Engine.cs" />
+    <Compile Include="../app/Hands.cs" Link="Shared/Hands.cs" />
+    <Compile Include="../app/Voice.cs" Link="Shared/Voice.cs" />
+    <Compile Include="../app/VoicePack.cs" Link="Shared/VoicePack.cs" />
+    <EmbeddedResource Include="../assets/sprites/*.png" LogicalName="Capri.Sprite.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="../assets/voice/*.wav" LogicalName="Capri.Voice.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="../assets/chip.png" LogicalName="Capri.Chip.png" />
+    <AvaloniaResource Include="../assets/fonts/ShareTechMono-Regular.ttf" Link="Assets/ShareTechMono-Regular.ttf" />
+  </ItemGroup>
+</Project>
