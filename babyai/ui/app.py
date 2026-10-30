@@ -1,14 +1,18 @@
 """Floating desktop overlay for BabyAI (Tkinter).
 
-A borderless, always-on-top assistant silhouette with one compact speech panel
-(cut corners, neon edge, status tag, inline input) and a minimal control row:
-pencil = type a message, mic = voice input, chip = launch the separate Capri
-app (see babyai.capri_launcher).
+A borderless, always-on-top assistant silhouette with a terminal-style speech
+bubble and a small control pill:
+
+* the bubble is a transcript: a dim ``> you:`` line, then the assistant's reply
+  in monospace that types itself out; your own typing appears inline on the
+  ``> you:`` line, so there is no separate input box;
+* pencil = type a message, wave = voice input, chip = launch the separate
+  Capri app (see babyai.capri_launcher).
 
 Transparency depends on the platform / compositor:
 
 * Windows and macOS: the window background is keyed out, so only the figure,
-  panel and buttons are visible - there is no app frame at all.
+  bubble and buttons are visible - there is no app frame at all.
 * X11 / Wayland (via XWayland), i.e. most Linux desktops: Tk cannot do per-pixel
   transparency, so the overlay uses a semi-transparent dark panel instead. The
   alpha needs a running compositor; without one the panel is simply opaque dark,
@@ -32,20 +36,13 @@ KEY_COLOR = "#010203"  # keyed out to transparent on Windows (not used elsewhere
 PANEL_BG = "#080d13"  # window fallback when real transparency is unavailable
 PANEL_ALPHA = 0.88
 
-# speech panel
-PANEL_FILL = "#2a1f34"
-PANEL_EDGE = "#8a52e8"
-TILE_FILL = "#3a2753"
-FIELD_BG = "#4a3d58"
-CLOSE_BG = "#3b3347"
-BTN_FILL = "#3f2d63"
-TAG_PURPLE = "#7c3fd9"
-TEXT_FG = "#f6f1e7"
-TEXT_DIM = "#a094ae"
-GREEN = "#3fe05a"
-GREEN_INK = "#0d3a1a"
-AMBER = "#ffcf4a"
-AMBER_INK = "#3d2c00"
+# speech bubble
+BUBBLE_FILL = "#0b0e14"
+CYAN = "#3ad6eb"
+RED = "#e82440"
+NEON = "#38b0ff"  # block cursor
+REPLY_FG = "#8bd0f0"
+DIM = "#8a93a3"
 ACCENT = "#ff2d7d"
 
 # figure
@@ -53,32 +50,65 @@ INK = "#171717"
 HALO = "#e9eef3"  # light outline so the silhouette reads on dark wallpapers
 HEAD_FILL = "#f4f7f9"
 
-# round control buttons
-BTN_BG = "#1d2430"
-BTN_HOVER = "#2a3446"
-BTN_EDGE = "#393d49"
+# control pill
+PILL_FILL = "#141519"
+PILL_EDGE = "#464952"
+PILL_HOVER = "#2a2d36"
 ICON = "#ffffff"
 
-PANEL_L, PANEL_R, PANEL_BOTTOM = 60, 500, 300  # the panel grows upward from its bottom edge
-PAD, TILE = 16, 52
-SEND_W, CLOSE_W, ROW_H = 72, 34, 34
-MAX_CHARS = 300
-ECHO_CHARS = 44
+BUBBLE_L, BUBBLE_R, BUBBLE_BOTTOM = 60, 500, 290  # the bubble grows upward from its bottom edge
+TAIL = 16
+MAX_LINES = 8
+MAX_CHARS = 420
+MAX_DRAFT = 500
 
-PENDING = "…"  # shown while the assistant is thinking
+TICK_MS = 40
+TYPE_SPEED = 2  # characters revealed per tick (~50 per second)
+BLINK_TICKS = 12  # cursor blink period / 2
+
 LAUNCHING = "Launching Capri…"  # shown while the Capri launcher checks the app stayed up
-PLACEHOLDER = "Say something…"
-
-BTN_R, BTN_Y = 26, 602
+BTN_Y = 602
 
 
 def _lerp(a: float, b: float, t: float) -> float:
     return a + (b - a) * t
 
 
-def _chamfer(x1: float, y1: float, x2: float, y2: float, tl: float = 0, br: float = 0) -> list[float]:
-    """Rectangle outline with the top-left and bottom-right corners cut off."""
-    return [x1 + tl, y1, x2, y1, x2, y2 - br, x2 - br, y2, x1, y2, x1, y1 + tl]
+def _plate(x1: float, y1: float, x2: float, y2: float, cut: float, tip_x: float, tail: float) -> list[float]:
+    """Bubble outline: left corners cut, pointer tail on the bottom edge toward tip_x."""
+    near = max(x1 + cut + 6, tip_x - tail * 0.8)
+    far = min(x2 - 6, tip_x + tail * 0.2)
+    return [
+        x1 + cut, y1, x2, y1, x2, y2, far, y2, tip_x, y2 + tail, near, y2,
+        x1 + cut, y2, x1, y2 - cut, x1, y1 + cut,
+    ]
+
+
+def _wrap(text: str, first_cols: int, cols: int) -> list[str]:
+    """Greedy word wrap; the first line may be narrower (it follows the name label)."""
+    lines: list[str] = []
+    for paragraph in text.split("\n"):
+        line = ""
+        width = first_cols if not lines else cols
+        for word in paragraph.split(" "):
+            while len(word) > width:  # hard-split words longer than a line
+                if line:
+                    lines.append(line)
+                    line = ""
+                    width = cols
+                lines.append(word[:width])
+                word = word[width:]
+                width = cols
+            if not line:
+                line = word
+            elif len(line) + 1 + len(word) <= width:
+                line += " " + word
+            else:
+                lines.append(line)
+                line = word
+                width = cols
+        lines.append(line)
+    return lines
 
 
 class BabyAIDesktopWindow:
@@ -98,27 +128,33 @@ class BabyAIDesktopWindow:
             bg=canvas_bg,
             highlightthickness=0,
             bd=0,
+            takefocus=1,
         )
         self.canvas.pack(fill="both", expand=True)
 
-        self._text = ""  # what the panel is saying
-        self._echo = ""  # the user's last message, shown dim above it
-        self._status = "READY"
+        self._reply = ""  # what the assistant is saying (revealed progressively)
+        self._echo = ""  # the user's last sent message
+        self._draft = ""  # what the user is typing right now
+        self._shown = 0  # reply characters revealed so far
+        self._target = 0  # reveal count at which the whole reply is visible
+        self._thinking = False
         self._input_open = False
-        self._placeholder_on = True
+        self._tick_n = 0
         self._busy = False
         self._capri_busy = False
         self._results: queue.Queue[str] = queue.Queue()
         self._notices: queue.Queue[str] = queue.Queue()
         self._drag: tuple[int, int] | None = None
         self._poll_id: str | None = None
+        self._tick_id: str | None = None
 
         self._make_fonts()
         self._draw_figure()
         self._build_controls()
         self._bind_events()
-        self._set_message(f"Hi, I'm {self._assistant_name()}. Pencil to type, mic to talk, chip to launch Capri.")
+        self._set_reply(f"Hi, I'm {self._assistant_name()}. Pencil to type, wave to talk, chip to launch Capri.")
         self._poll_results()
+        self._tick()
 
         if not self.transparent:
             self.root.update()  # map the window first
@@ -176,27 +212,16 @@ class BabyAIDesktopWindow:
 
     def _make_fonts(self) -> None:
         families = {name.lower(): name for name in tkfont.families(self.root)}
-
-        def pick(candidates: tuple[str, ...], fallback: str) -> str:
-            for candidate in candidates:
-                if candidate.lower() in families:
-                    return families[candidate.lower()]
-            return fallback
-
-        sans = pick(
-            ("Inter", "Segoe UI", "SF Pro Text", "Helvetica Neue", "Noto Sans", "DejaVu Sans"),
-            tkfont.nametofont("TkDefaultFont", root=self.root).actual("family"),
-        )
-        mono = pick(
-            ("Share Tech Mono", "Cascadia Mono", "Consolas", "SF Mono", "Menlo", "DejaVu Sans Mono", "Liberation Mono"),
-            tkfont.nametofont("TkFixedFont", root=self.root).actual("family"),
-        )
-        self.font_body = tkfont.Font(root=self.root, family=sans, size=11)
-        self.font_msg = tkfont.Font(root=self.root, family=sans, size=13, weight="bold")
-        self.font_mono = tkfont.Font(root=self.root, family=mono, size=9)
-        self.font_mono_b = tkfont.Font(root=self.root, family=mono, size=9, weight="bold")
-        self.font_mono_s = tkfont.Font(root=self.root, family=mono, size=8)
-        self.font_mono_sb = tkfont.Font(root=self.root, family=mono, size=8, weight="bold")
+        mono = tkfont.nametofont("TkFixedFont", root=self.root).actual("family")
+        for candidate in ("Share Tech Mono", "Cascadia Mono", "Consolas", "SF Mono", "Menlo", "DejaVu Sans Mono", "Liberation Mono"):
+            if candidate.lower() in families:
+                mono = families[candidate.lower()]
+                break
+        self.font_mono = tkfont.Font(root=self.root, family=mono, size=10)
+        self.font_label = tkfont.Font(root=self.root, family=mono, size=10, weight="bold")
+        self.font_echo = tkfont.Font(root=self.root, family=mono, size=10, slant="italic")
+        self.char_w = max(1, self.font_mono.measure("M"))
+        self.line_h = self.font_mono.metrics("linespace") + 5
 
     def _assistant_name(self) -> str:
         try:
@@ -204,13 +229,15 @@ class BabyAIDesktopWindow:
         except Exception:
             return "BabyAI"
 
-    def _model_name(self) -> str:
-        try:
-            return str(self.assistant.config.get("llm", {}).get("model", "")) or "local"
-        except Exception:
-            return "local"
-
     # ----------------------------------------------------------------- drawing
+
+    def _rounded_rect(self, x1: float, y1: float, x2: float, y2: float, r: float, **kw) -> int:
+        points = [
+            x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r,
+            x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2,
+            x1, y2, x1, y2 - r, x1, y1 + r, x1, y1,
+        ]
+        return self.canvas.create_polygon(points, smooth=True, **kw)
 
     def _draw_figure(self) -> None:
         """Floating stick-figure silhouette: halo, ink body, accent lines, head."""
@@ -250,67 +277,47 @@ class BabyAIDesktopWindow:
         )
 
     def _build_controls(self) -> None:
+        c = self.canvas
         cx = WIDTH // 2
-        self._make_button(cx - 90, BTN_Y, "pencil", self._toggle_input, self._draw_pencil)
-        self._make_button(cx, BTN_Y, "mic", self._on_mic, self._draw_mic)
-        self._make_button(cx + 90, BTN_Y, "capri", self._on_capri, self._draw_chip)
+        x1, x2 = cx - 73, cx + 27
+        self._rounded_rect(x1, BTN_Y - 18, x2, BTN_Y + 18, 18, fill=PILL_FILL, outline=PILL_EDGE, width=2, tags="pill")
+        c.create_line((x1 + x2) / 2, BTN_Y - 9, (x1 + x2) / 2, BTN_Y + 9, fill=PILL_EDGE, width=1, tags="pill")
+        self._make_button(x1 + 25, BTN_Y, "pencil", self._toggle_input, self._draw_pencil, r=15)
+        self._make_button(x2 - 25, BTN_Y, "voice", self._on_mic, self._draw_wave, r=15)
+        self._make_button(cx + 55, BTN_Y, "capri", self._on_capri, self._draw_chip, r=18, ring=True)
 
-        self.entry = tk.Entry(
-            self.root,
-            bg=FIELD_BG,
-            fg=TEXT_DIM,
-            insertbackground=GREEN,
-            relief="flat",
-            bd=0,
-            highlightthickness=0,
-            font=self.font_body,
-        )
-        self.entry.insert(0, PLACEHOLDER)
-        self.entry.bind("<Return>", self._on_entry_return)
-        self.entry.bind("<Escape>", self._on_entry_escape)
-        self.entry.bind("<FocusIn>", self._on_entry_focus_in)
-        self.entry.bind("<FocusOut>", self._on_entry_focus_out)
-        self._entry_win = self.canvas.create_window(0, 0, window=self.entry, state="hidden")
-
-    def _make_button(self, x: int, y: int, name: str, command, draw_icon) -> None:
+    def _make_button(self, x: float, y: float, name: str, command, draw_icon, r: int, ring: bool = False) -> None:
         c = self.canvas
         tag = f"btn_{name}"
         disc = c.create_oval(
-            x - BTN_R, y - BTN_R, x + BTN_R, y + BTN_R,
-            fill=BTN_BG, outline=BTN_EDGE, width=2, tags=("btn", tag),
+            x - r, y - r, x + r, y + r,
+            fill=PILL_FILL, outline=PILL_EDGE if ring else "", width=2, tags=("btn", tag),
         )
         draw_icon(x, y, ("btn", tag))
 
         def on_enter(_event):
-            c.itemconfigure(disc, fill=BTN_HOVER)
+            c.itemconfigure(disc, fill=PILL_HOVER)
             c.configure(cursor="hand2")
 
         def on_leave(_event):
-            c.itemconfigure(disc, fill=BTN_BG)
+            c.itemconfigure(disc, fill=PILL_FILL)
             c.configure(cursor="")
 
         c.tag_bind(tag, "<Enter>", on_enter)
         c.tag_bind(tag, "<Leave>", on_leave)
         c.tag_bind(tag, "<Button-1>", lambda _event: command())
 
-    def _draw_pencil(self, x: int, y: int, tags) -> None:
+    def _draw_pencil(self, x: float, y: float, tags) -> None:
         c = self.canvas
         c.create_polygon(x - 10, y + 10, x - 9, y + 3, x - 3, y + 9, fill=ICON, outline="", tags=tags)
         c.create_line(x - 6, y + 6, x + 7, y - 7, width=7, fill=ICON, capstyle="butt", tags=tags)
         c.create_line(x + 8, y - 8, x + 11, y - 11, width=7, fill=ACCENT, capstyle="butt", tags=tags)
 
-    def _draw_mic(self, x: int, y: int, tags) -> None:
-        c = self.canvas
-        c.create_polygon(
-            x - 5, y - 8, x - 5, y - 8, x - 4, y - 13, x, y - 14, x + 4, y - 13, x + 5, y - 8,
-            x + 5, y, x + 4, y + 3, x, y + 4, x - 4, y + 3, x - 5, y,
-            smooth=True, fill=ICON, outline="", tags=tags,
-        )
-        c.create_arc(x - 10, y - 9, x + 10, y + 9, start=180, extent=180, style="arc", outline=ICON, width=2, tags=tags)
-        c.create_line(x, y + 9, x, y + 14, fill=ICON, width=2, tags=tags)
-        c.create_line(x - 5, y + 14, x + 5, y + 14, fill=ICON, width=2, capstyle="round", tags=tags)
+    def _draw_wave(self, x: float, y: float, tags) -> None:
+        for dx, half in ((-8, 3), (-4, 7), (0, 11), (4, 7), (8, 3)):
+            self.canvas.create_line(x + dx, y - half, x + dx, y + half, fill=CYAN, width=2, capstyle="round", tags=tags)
 
-    def _draw_chip(self, x: int, y: int, tags) -> None:
+    def _draw_chip(self, x: float, y: float, tags) -> None:
         c = self.canvas
         c.create_rectangle(x - 8, y - 8, x + 8, y + 8, outline=ICON, width=2, tags=tags)
         c.create_rectangle(x - 3, y - 3, x + 3, y + 3, fill=ACCENT, outline="", tags=tags)
@@ -320,120 +327,94 @@ class BabyAIDesktopWindow:
             c.create_line(x - 12, y + d, x - 8, y + d, fill=ICON, width=2, tags=tags)
             c.create_line(x + 8, y + d, x + 12, y + d, fill=ICON, width=2, tags=tags)
 
-    # ------------------------------------------------------------- speech panel
+    # ------------------------------------------------------------ speech bubble
 
-    def _set_message(self, text: str, status: str = "READY") -> None:
-        self._text = text
-        self._status = status
-        self._render_panel()
+    def _set_reply(self, text: str, thinking: bool = False) -> None:
+        self._reply = text
+        self._thinking = thinking
+        self._shown = 0  # the reply types itself out from the start
+        self._render_bubble()
 
-    def _render_panel(self) -> None:
-        """Redraw the speech panel. Items are laid out from y=0, then the whole
-        panel is moved so its bottom edge sits on PANEL_BOTTOM (it grows upward)."""
+    def _render_bubble(self) -> None:
+        """Redraw the transcript bubble. It is laid out from y=0, then moved so its
+        bottom edge sits on BUBBLE_BOTTOM (it grows upward, tail pointing at the figure)."""
         c = self.canvas
-        c.delete("panel")
-        c.configure(cursor="")
-        L, R = PANEL_L, PANEL_R
-        top = 0
-        text_x = L + PAD + TILE + 14
-        msg_w = R - PAD - text_x
+        c.delete("bubble")
+        L, R = BUBBLE_L, BUBBLE_R
+        x0 = L + 26
+        cw, lh = self.char_w, self.line_h
+        cols = max(12, int((R - 16 - x0) // cw))
+        label = f"{self._assistant_name().upper()}:"
+        label_px = self.font_label.measure(label) + cw  # the reply starts one space after the label
+        label_cols = -(-label_px // cw)  # ceil
 
-        # avatar tile: this assistant's own head, not a borrowed character
-        tx, ty = L + PAD, top + PAD
-        first = c.create_polygon(
-            _chamfer(tx, ty, tx + TILE, ty + TILE, 8, 8), fill=TILE_FILL, outline=PANEL_EDGE, width=2, tags="panel"
-        )
-        hx, hy = tx + TILE // 2, ty + 19
-        c.create_arc(  # shoulders
-            hx - 17, hy + 13, hx + 17, hy + 47, start=0, extent=180, style="chord",
-            fill=HALO, outline=ACCENT, width=2, tags="panel",
-        )
-        c.create_oval(hx - 11, hy - 11, hx + 11, hy + 11, fill=HEAD_FILL, outline=INK, width=2, tags="panel")
+        reply = self._reply if len(self._reply) <= MAX_CHARS else self._reply[: MAX_CHARS - 1] + "…"
+        lines = _wrap(reply, cols - label_cols, cols) if reply else [""]
+        if len(lines) > MAX_LINES:
+            lines = lines[:MAX_LINES]
+            lines[-1] = lines[-1][: cols - 2].rstrip() + "…"
+        self._target = sum(len(line) + 1 for line in lines)
 
-        # header: NAME / MODEL
-        name = c.create_text(
-            text_x, ty, anchor="nw", text=self._assistant_name().upper(), font=self.font_mono_b, fill=TEXT_FG, tags="panel"
-        )
-        c.create_text(
-            c.bbox(name)[2] + 8, ty, anchor="nw", text="/  " + self._model_name().upper(),
-            font=self.font_mono, fill=TEXT_DIM, tags="panel",
-        )
-
-        y = ty + 20
-        if self._echo:
-            echo = self._echo if len(self._echo) <= ECHO_CHARS else self._echo[: ECHO_CHARS - 1] + "…"
-            line = c.create_text(text_x, y, anchor="nw", text="> " + echo, font=self.font_mono, fill=TEXT_DIM, tags="panel")
-            y = c.bbox(line)[3] + 2
-        label = self._text if len(self._text) <= MAX_CHARS else self._text[: MAX_CHARS - 1] + "…"
-        message = c.create_text(
-            text_x, y, anchor="nw", width=msg_w, text=label, font=self.font_msg, fill=TEXT_FG, tags="panel"
-        )
-        bottom = max(c.bbox(message)[3], ty + TILE) + 12
-
-        if self._input_open:
-            fx1 = L + PAD
-            fx2 = R - PAD - SEND_W - CLOSE_W - 16
-            c.create_rectangle(fx1, bottom, fx2, bottom + ROW_H, fill=FIELD_BG, outline="", tags="panel")
-            c.create_rectangle(fx1, bottom + ROW_H - 3, fx2, bottom + ROW_H, fill=GREEN, outline="", tags="panel")
-            c.coords(self._entry_win, (fx1 + fx2) / 2, bottom + (ROW_H - 3) / 2)
-            c.itemconfigure(self._entry_win, width=fx2 - fx1 - 12, height=ROW_H - 8, state="normal")
-            sx1 = fx2 + 8
-            self._panel_button(
-                "send", _chamfer(sx1, bottom, sx1 + SEND_W, bottom + ROW_H, 6, 6), GREEN, GREEN, "SEND", GREEN_INK,
-                (sx1 + SEND_W / 2, bottom + ROW_H / 2), self.font_mono_b,
-            )
-            cx1 = sx1 + SEND_W + 8
-            self._panel_button(
-                "close", _chamfer(cx1, bottom, cx1 + CLOSE_W, bottom + ROW_H, 0, 0), CLOSE_BG, CLOSE_BG, "", TEXT_FG,
-                (cx1 + CLOSE_W / 2, bottom + ROW_H / 2), self.font_mono_b,
-            )
-            mx, my = cx1 + CLOSE_W / 2, bottom + ROW_H / 2  # drawn, not a font glyph, so it never changes size
-            for dx in (-1, 1):
-                c.create_line(mx - 5, my - 5 * dx, mx + 5, my + 5 * dx, fill=TEXT_FG, width=2, tags=("panel", "btn", "act_close"))
-            note_y = bottom + ROW_H + 10
-            c.create_rectangle(fx1, note_y, fx1 + 22, note_y + 14, fill=TAG_PURPLE, outline="", tags="panel")
-            c.create_text(fx1 + 11, note_y + 7, text="AI", font=self.font_mono_sb, fill="#ffffff", tags="panel")
-            note = c.create_text(
-                fx1 + 30, note_y + 7, anchor="w", text="Enter to send  ·  Esc to close", font=self.font_mono_s,
-                fill=TEXT_DIM, tags="panel",
-            )
-            bottom = c.bbox(note)[3]
-        else:
-            c.itemconfigure(self._entry_win, state="hidden")
-            self._panel_button(
-                "talk", _chamfer(text_x, bottom - 2, text_x + 96, bottom + 20, 5, 5), BTN_FILL, PANEL_EDGE, "TALK TO ME",
-                TEXT_FG, (text_x + 48, bottom + 9), self.font_mono_sb,
-            )
-            bottom += 20
-
-        height = bottom + PAD
-        edge = c.create_polygon(
-            _chamfer(L, top, R, height, 12, 22), fill=PANEL_FILL, outline=PANEL_EDGE, width=2, tags="panel"
-        )
-        c.create_line(R, top + 4, R, height - 22, fill=PANEL_EDGE, width=5, tags="panel")
-        c.tag_lower(edge, first)
-
-        # status tag straddling the top-right edge
-        busy = self._status != "READY"
-        tag_text = f"AI · {self._status}"
-        tag_w = 14 + self.font_mono_sb.measure(tag_text)
-        gx2 = R - PAD
+        has_echo = self._input_open or bool(self._echo)
+        pad = 12
+        height = pad * 2 + (len(lines) + (1 if has_echo else 0)) * lh
         c.create_polygon(
-            _chamfer(gx2 - tag_w, top - 9, gx2, top + 13, 5, 5), fill=AMBER if busy else GREEN, outline="", tags="panel"
+            _plate(L, 0, R, height, 10, WIDTH // 2, TAIL),
+            fill=BUBBLE_FILL, outline=CYAN, width=2, joinstyle="miter", tags="bubble",
         )
-        c.create_text(
-            gx2 - tag_w / 2, top + 2, text=tag_text, font=self.font_mono_sb, fill=AMBER_INK if busy else GREEN_INK, tags="panel"
+        c.create_line(L + 11, 10, L + 11, height - 10, fill=RED, width=3, tags="bubble")
+
+        blink_on = (self._tick_n // BLINK_TICKS) % 2 == 0
+        y = pad
+        if has_echo:
+            if self._input_open:
+                room = cols - 9
+                body = self._draft if len(self._draft) <= room else "…" + self._draft[-room:]
+            else:
+                room = cols - 7
+                body = self._echo if len(self._echo) <= room else self._echo[: room - 1] + "…"
+            text = "> you: " + body
+            c.create_text(x0, y, anchor="nw", text=text, font=self.font_echo, fill=DIM, tags="bubble")
+            if self._input_open and blink_on:
+                self._block(x0 + self.font_echo.measure(text), y)
+            y += lh
+
+        c.create_text(x0, y, anchor="nw", text=label, font=self.font_label, fill=RED, tags="bubble")
+        if self._thinking:
+            if blink_on:
+                self._block(x0 + label_px, y)
+        else:
+            remaining = self._shown
+            for i, line in enumerate(lines):
+                lx = x0 + (label_px if i == 0 else 0)
+                ly = y + i * lh
+                part = line[: max(0, remaining)]
+                if part:
+                    c.create_text(lx, ly, anchor="nw", text=part, font=self.font_mono, fill=REPLY_FG, tags="bubble")
+                if remaining < len(line) + 1:  # the reveal is still in this line
+                    if self._shown < self._target:
+                        self._block(lx + self.font_mono.measure(part), ly)
+                    break
+                remaining -= len(line) + 1
+
+        c.move("bubble", 0, BUBBLE_BOTTOM - height)
+
+    def _block(self, x: float, y: float) -> None:
+        self.canvas.create_rectangle(
+            x, y + 2, x + self.char_w * 0.8, y + self.line_h - 5, fill=NEON, outline="", tags="bubble"
         )
 
-        dy = PANEL_BOTTOM - height
-        c.move("panel", 0, dy)
-        if self._input_open:
-            c.move(self._entry_win, 0, dy)
-
-    def _panel_button(self, name, points, fill, outline, label, label_fg, center, font) -> None:
-        tags = ("panel", "btn", f"act_{name}")
-        self.canvas.create_polygon(points, fill=fill, outline=outline, width=2, tags=tags)
-        self.canvas.create_text(center[0], center[1], text=label, font=font, fill=label_fg, tags=tags)
+    def _tick(self) -> None:
+        self._tick_n += 1
+        dirty = False
+        if not self._thinking and self._shown < self._target:
+            self._shown = min(self._target, self._shown + TYPE_SPEED)
+            dirty = True
+        if self._tick_n % BLINK_TICKS == 0 and (self._input_open or self._thinking):
+            dirty = True
+        if dirty:
+            self._render_bubble()
+        self._tick_id = self.root.after(TICK_MS, self._tick)
 
     # ------------------------------------------------------------- interaction
 
@@ -445,49 +426,52 @@ class BabyAIDesktopWindow:
 
     def _open_input(self) -> None:
         self._input_open = True
-        self._render_panel()
-        self.entry.focus_force()
+        self._draft = ""
+        self._render_bubble()
+        self.canvas.focus_force()
 
     def _close_input(self) -> None:
         self._input_open = False
-        self._render_panel()
+        self._draft = ""
+        self._render_bubble()
         self.root.focus_set()
 
-    def _entry_text(self) -> str:
-        return "" if self._placeholder_on else self.entry.get().strip()
-
-    def _on_entry_focus_in(self, _event) -> None:
-        if self._placeholder_on:
-            self.entry.delete(0, "end")
-            self.entry.configure(fg=TEXT_FG)
-            self._placeholder_on = False
-
-    def _on_entry_focus_out(self, _event) -> None:
-        if not self.entry.get():
-            self.entry.insert(0, PLACEHOLDER)
-            self.entry.configure(fg=TEXT_DIM)
-            self._placeholder_on = True
-
-    def _on_entry_return(self, _event) -> str:
-        self._on_send()
+    def _on_key(self, event) -> str | None:
+        if not self._input_open:
+            return None
+        if event.keysym in ("Return", "KP_Enter"):
+            self._send()
+        elif event.keysym == "Escape":
+            self._close_input()
+        elif event.keysym == "BackSpace":
+            self._draft = self._draft[:-1]
+        elif (event.state & 0x4) and event.keysym.lower() == "v":  # Ctrl+V
+            try:
+                pasted = " ".join(self.root.clipboard_get().split())
+            except tk.TclError:
+                pasted = ""
+            self._draft = (self._draft + pasted)[:MAX_DRAFT]
+        elif event.char and event.char.isprintable() and len(self._draft) < MAX_DRAFT:
+            self._draft += event.char
+        else:
+            return None
+        self._render_bubble()
         return "break"
 
-    def _on_entry_escape(self, _event) -> str:
-        self._close_input()
-        return "break"
-
-    def _on_send(self) -> None:
-        text = self._entry_text()
-        if text and not self._busy:
-            self.entry.delete(0, "end")
-            self._submit(text)
+    def _send(self) -> None:
+        text = self._draft.strip()
+        if not text or self._busy:
+            return
+        self._input_open = False
+        self._draft = ""
+        self._submit(text)
 
     def _submit(self, text: str) -> None:
         if self._busy:
             return
         self._busy = True
         self._echo = text
-        self._set_message(PENDING, "THINKING")
+        self._set_reply("", thinking=True)
         threading.Thread(target=self._ask_assistant, args=(text,), daemon=True).start()
 
     def _ask_assistant(self, text: str) -> None:
@@ -502,13 +486,13 @@ class BabyAIDesktopWindow:
     def _poll_results(self) -> None:
         try:
             while True:
-                self._set_message(self._results.get_nowait())
+                self._set_reply(self._results.get_nowait())
                 self._busy = False
         except queue.Empty:
             pass
         try:
             while True:
-                self._set_message(self._notices.get_nowait())
+                self._set_reply(self._notices.get_nowait())
                 self._capri_busy = False
         except queue.Empty:
             pass
@@ -528,13 +512,13 @@ class BabyAIDesktopWindow:
         if available and heard:
             self._submit(heard)
         else:
-            self._set_message(heard or "Voice input isn't available.")
+            self._set_reply(heard or "Voice input isn't available.")
 
     def _on_capri(self) -> None:
         if self._capri_busy:
             return
         self._capri_busy = True
-        self._set_message(LAUNCHING, "LAUNCHING")
+        self._set_reply(LAUNCHING)
         threading.Thread(target=self._launch_capri, daemon=True).start()
 
     def _launch_capri(self) -> None:
@@ -554,18 +538,13 @@ class BabyAIDesktopWindow:
         c = self.canvas
         c.bind("<ButtonPress-1>", self._start_drag)
         c.bind("<B1-Motion>", self._move_window)
-
-        for name, handler in (("send", self._on_send), ("close", self._close_input), ("talk", self._open_input)):
-            tag = f"act_{name}"
-            c.tag_bind(tag, "<Button-1>", lambda _event, run=handler: run())
-            c.tag_bind(tag, "<Enter>", lambda _event: c.configure(cursor="hand2"))
-            c.tag_bind(tag, "<Leave>", lambda _event: c.configure(cursor=""))
+        c.bind("<Key>", self._on_key)
 
         self.menu = tk.Menu(self.root, tearoff=0)
         self.menu.add_command(label="Quit BabyAI", command=self.close)
         c.bind("<Button-2>" if self._windowing == "aqua" else "<Button-3>", self._popup_menu)
 
-        self.root.bind("<Escape>", self.close)
+        self.root.bind("<Escape>", self.close)  # Esc while typing is handled (and stopped) in _on_key
         self.root.bind("<Control-q>", self.close)
 
     def _start_drag(self, event) -> None:
@@ -573,6 +552,8 @@ class BabyAIDesktopWindow:
         if current and "btn" in self.canvas.gettags(current[0]):
             self._drag = None  # a button press, not a window drag
             return
+        if self._input_open:
+            self.canvas.focus_force()
         self._drag = (event.x_root - self.root.winfo_x(), event.y_root - self.root.winfo_y())
 
     def _move_window(self, event) -> None:
@@ -587,11 +568,12 @@ class BabyAIDesktopWindow:
             self.menu.grab_release()
 
     def close(self, _event=None) -> None:
-        if self._poll_id is not None:
-            try:
-                self.root.after_cancel(self._poll_id)
-            except tk.TclError:
-                pass
+        for after_id in (self._poll_id, self._tick_id):
+            if after_id is not None:
+                try:
+                    self.root.after_cancel(after_id)
+                except tk.TclError:
+                    pass
         self.root.destroy()
 
     def run(self) -> None:
