@@ -9,8 +9,18 @@ def main(argv=None):
     parser.add_argument("--voice", action="store_true", help="Enable voice mode if available")
     parser.add_argument("--no-voice", action="store_true", help="Disable voice mode")
     parser.add_argument("--desktop", action="store_true", help="Launch the floating desktop overlay (needs Tk)")
+    parser.add_argument("--capri", action="store_true", help="Launch the built Capri companion app from capri/ and exit; if it can't start, carry on as usual")
     parser.add_argument("command", nargs="?", help="Run a single text command instead of interactive mode")
     args = parser.parse_args(argv)
+
+    if args.capri:
+        from babyai.capri_launcher import launch_capri
+
+        result = launch_capri()
+        print(result.message)
+        if result.ok:
+            return 0
+        print("Continuing without Capri...")
 
     voice_enabled = bool(args.voice) and not bool(args.no_voice)
     assistant = BabyAI(config_path=args.config, voice_enabled=voice_enabled)
