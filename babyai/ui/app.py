@@ -1,7 +1,8 @@
 """Floating desktop overlay for BabyAI (Tkinter).
 
 A borderless, always-on-top assistant silhouette with dark chat bubbles and a
-minimal control row (pencil = type a message, mic = voice input).
+minimal control row (pencil = type a message, mic = voice input, chip = launch
+the separate Capri app, see babyai.capri_launcher).
 
 Transparency depends on the platform / compositor:
 
@@ -49,6 +50,7 @@ BUBBLE_MAX_W = 400
 MAX_BUBBLES = 4
 MAX_CHARS = 480
 PENDING = "…"  # shown while the assistant is thinking
+LAUNCHING = "Launching Capri…"  # shown while the Capri launcher checks the app stayed up
 
 BTN_R, BTN_Y = 26, 602
 ENTRY_Y = 548
@@ -80,7 +82,9 @@ class BabyAIDesktopWindow:
 
         self.messages: list[tuple[str, str]] = []
         self._busy = False
+        self._capri_busy = False
         self._results: queue.Queue[str] = queue.Queue()
+        self._notices: queue.Queue[str] = queue.Queue()
         self._drag: tuple[int, int] | None = None
         self._poll_id: str | None = None
 
@@ -88,7 +92,7 @@ class BabyAIDesktopWindow:
         self._draw_figure()
         self._build_controls()
         self._bind_events()
-        self._add_message("assistant", f"Hi, I'm {self._assistant_name()}. Tap the pencil to type, or the mic to talk.")
+        self._add_message("assistant", f"Hi, I'm {self._assistant_name()}. Pencil to type, mic to talk, chip to launch Capri.")
         self._poll_results()
 
         if not self.transparent:
@@ -209,8 +213,9 @@ class BabyAIDesktopWindow:
 
     def _build_controls(self) -> None:
         cx = WIDTH // 2
-        self._make_button(cx - 50, BTN_Y, "pencil", self._toggle_entry, self._draw_pencil)
-        self._make_button(cx + 50, BTN_Y, "mic", self._on_mic, self._draw_mic)
+        self._make_button(cx - 90, BTN_Y, "pencil", self._toggle_entry, self._draw_pencil)
+        self._make_button(cx, BTN_Y, "mic", self._on_mic, self._draw_mic)
+        self._make_button(cx + 90, BTN_Y, "capri", self._on_capri, self._draw_chip)
 
         self.entry = tk.Entry(
             self.root,
@@ -264,6 +269,16 @@ class BabyAIDesktopWindow:
         c.create_line(x, y + 9, x, y + 14, fill=ICON, width=2, tags=tags)
         c.create_line(x - 5, y + 14, x + 5, y + 14, fill=ICON, width=2, capstyle="round", tags=tags)
 
+    def _draw_chip(self, x: int, y: int, tags) -> None:
+        c = self.canvas
+        c.create_rectangle(x - 8, y - 8, x + 8, y + 8, outline=ICON, width=2, tags=tags)
+        c.create_rectangle(x - 3, y - 3, x + 3, y + 3, fill=ACCENT, outline="", tags=tags)
+        for d in (-4, 4):  # pins on all four sides
+            c.create_line(x + d, y - 12, x + d, y - 8, fill=ICON, width=2, tags=tags)
+            c.create_line(x + d, y + 8, x + d, y + 12, fill=ICON, width=2, tags=tags)
+            c.create_line(x - 12, y + d, x - 8, y + d, fill=ICON, width=2, tags=tags)
+            c.create_line(x + 8, y + d, x + 12, y + d, fill=ICON, width=2, tags=tags)
+
     # ----------------------------------------------------------------- bubbles
 
     def _add_message(self, role: str, text: str) -> None:
@@ -271,12 +286,13 @@ class BabyAIDesktopWindow:
         del self.messages[:-MAX_BUBBLES]
         self._redraw_bubbles()
 
-    def _replace_pending(self, text: str) -> None:
+    def _replace_pending(self, text: str, marker: str = PENDING) -> None:
         for index in range(len(self.messages) - 1, -1, -1):
-            if self.messages[index] == ("assistant", PENDING):
+            if self.messages[index] == ("assistant", marker):
                 self.messages[index] = ("assistant", text)
-                break
-        self._redraw_bubbles()
+                self._redraw_bubbles()
+                return
+        self._add_message("assistant", text)  # placeholder scrolled away: still show the result
 
     def _redraw_bubbles(self) -> None:
         self.canvas.delete("bubble")
@@ -359,6 +375,12 @@ class BabyAIDesktopWindow:
                 self._busy = False
         except queue.Empty:
             pass
+        try:
+            while True:
+                self._replace_pending(self._notices.get_nowait(), LAUNCHING)
+                self._capri_busy = False
+        except queue.Empty:
+            pass
         self._poll_id = self.root.after(100, self._poll_results)
 
     def _on_mic(self) -> None:
@@ -376,6 +398,24 @@ class BabyAIDesktopWindow:
             self._submit(heard)
         else:
             self._add_message("assistant", heard or "Voice input isn't available.")
+
+    def _on_capri(self) -> None:
+        if self._capri_busy:
+            return
+        self._capri_busy = True
+        self._add_message("assistant", LAUNCHING)
+        threading.Thread(target=self._launch_capri, daemon=True).start()
+
+    def _launch_capri(self) -> None:
+        # launch_capri() waits ~1.5 s to see whether Capri stays up, so it runs off
+        # the Tk thread; the outcome comes back through a queue like assistant replies.
+        try:
+            from babyai.capri_launcher import launch_capri
+
+            message = launch_capri().message
+        except Exception as exc:
+            message = f"Could not launch Capri: {exc}"
+        self._notices.put(message)
 
     # ------------------------------------------------------------ drag / close
 
