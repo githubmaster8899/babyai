@@ -29,7 +29,7 @@ import tkinter as tk
 from tkinter import font as tkfont
 from typing import TYPE_CHECKING
 
-from babyai.ui.behavior import SleepClock, thinking_label
+from babyai.ui.behavior import SleepClock, eye_offset, thinking_label
 
 if TYPE_CHECKING:  # the UI only relies on the assistant's public methods at runtime
     from babyai.agent.core import BabyAI
@@ -160,6 +160,7 @@ class BabyAIDesktopWindow:
         self._tick_id: str | None = None
         self._clock = SleepClock(time.monotonic())  # idle tracking: when the figure falls asleep / wakes
         self._last_pointer: tuple[int, int] | None = None
+        self._look = (0, 0)  # how far the eyes are slid toward the pointer, in pixels
         self._face_drawn: tuple | None = None  # what the eyes and "z z z" currently show
 
         self._make_fonts()
@@ -296,7 +297,8 @@ class BabyAIDesktopWindow:
     def _face_state(self) -> tuple:
         asleep = self._clock.asleep
         letters = Z_CYCLE[(self._tick_n // Z_TICKS) % len(Z_CYCLE)] if asleep else 0
-        return (asleep, letters)
+        look_x, look_y = (0, 0) if asleep else self._look
+        return (asleep, letters, look_x, look_y)
 
     def _sync_face(self) -> None:
         """Redraw the eyes and the sleeping "z z z" only when what they show has changed."""
@@ -305,12 +307,12 @@ class BabyAIDesktopWindow:
             self._face_drawn = state
             self._draw_face(*state)
 
-    def _draw_face(self, asleep: bool, letters: int) -> None:
+    def _draw_face(self, asleep: bool, letters: int, look_x: int, look_y: int) -> None:
         c = self.canvas
         c.delete("face")
         cx = WIDTH // 2
         for side in (-1, 1):
-            ex, ey = cx + side * EYE_DX, HEAD_Y + EYE_DY
+            ex, ey = cx + side * EYE_DX + look_x, HEAD_Y + EYE_DY + look_y
             if asleep:  # closed eyes
                 c.create_line(ex - 5, ey, ex + 5, ey, fill=INK, width=3, capstyle="round", tags="face")
             else:
@@ -330,6 +332,7 @@ class BabyAIDesktopWindow:
             self._clock.touch(now)
         distance, moved = None, False
         if self._tick_n % POINTER_TICKS == 0:
+            self._look = (0, 0)
             try:
                 px, py = self.root.winfo_pointerxy()
             except tk.TclError:
@@ -338,6 +341,7 @@ class BabyAIDesktopWindow:
                 head_x = self.root.winfo_rootx() + WIDTH // 2
                 head_y = self.root.winfo_rooty() + HEAD_Y
                 distance = math.hypot(px - head_x, py - head_y)
+                self._look = eye_offset(px - head_x, py - head_y)
                 moved = self._last_pointer is not None and (px, py) != self._last_pointer
                 self._last_pointer = (px, py)
         self._clock.tick(now, distance, moved)

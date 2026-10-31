@@ -1,7 +1,7 @@
 import unittest
 
 from babyai.ui import behavior
-from babyai.ui.behavior import SleepClock, thinking_label
+from babyai.ui.behavior import SleepClock, eye_offset, thinking_label
 
 
 class ThinkingLabelTests(unittest.TestCase):
@@ -84,6 +84,37 @@ class SleepClockTests(unittest.TestCase):
         clock = SleepClock(now=0)
         self.assertEqual(clock.sleep_after_s, 600.0)
         self.assertEqual(clock.wake_radius_px, 150.0)
+
+
+class EyeOffsetTests(unittest.TestCase):
+    def test_eyes_stay_centred_outside_the_radius(self):
+        self.assertEqual(eye_offset(300, 0), (0, 0))
+        self.assertEqual(eye_offset(0, -251), (0, 0))
+        self.assertEqual(eye_offset(200, 200), (0, 0))  # ~283 px away
+
+    def test_the_edge_of_the_radius_counts_as_inside(self):
+        self.assertEqual(eye_offset(250, 0), (6, 0))
+
+    def test_eyes_turn_toward_the_pointer_in_each_direction(self):
+        self.assertEqual(eye_offset(200, 0), (6, 0))
+        self.assertEqual(eye_offset(-200, 0), (-6, 0))
+        self.assertEqual(eye_offset(0, 200), (0, 4))
+        self.assertEqual(eye_offset(0, -200), (0, -4))
+
+    def test_diagonal_pointer_turns_both_axes(self):
+        self.assertEqual(eye_offset(141.42, 141.42), (4, 3))
+        self.assertEqual(eye_offset(-141.42, -141.42), (-4, -3))
+
+    def test_pointer_on_the_head_leaves_the_eyes_centred(self):
+        self.assertEqual(eye_offset(0, 0), (0, 0))
+
+    def test_eyes_ease_in_as_the_pointer_gets_close(self):
+        self.assertEqual(eye_offset(40, 0), (3, 0))  # half of full_at -> half of the reach
+        self.assertEqual(eye_offset(80, 0), (6, 0))
+
+    def test_radius_and_reach_are_configurable(self):
+        self.assertEqual(eye_offset(150, 0, radius=100), (0, 0))
+        self.assertEqual(eye_offset(90, 0, radius=100, reach=(10, 5), full_at=90), (10, 0))
 
 
 if __name__ == "__main__":
