@@ -21,11 +21,15 @@ Transparency depends on the platform / compositor:
 
 from __future__ import annotations
 
+import math
 import queue
 import threading
+import time
 import tkinter as tk
 from tkinter import font as tkfont
 from typing import TYPE_CHECKING
+
+from babyai.ui.behavior import SleepClock, eye_offset, thinking_label, timings_from_config
 
 if TYPE_CHECKING:  # the UI only relies on the assistant's public methods at runtime
     from babyai.agent.core import BabyAI
@@ -49,6 +53,8 @@ ACCENT = "#ff2d7d"
 INK = "#171717"
 HALO = "#e9eef3"  # light outline so the silhouette reads on dark wallpapers
 HEAD_FILL = "#f4f7f9"
+HEAD_Y, HEAD_R = 344, 26  # head centre (canvas y) and radius
+EYE_DX, EYE_DY, EYE_R = 9, -3, 3.5  # eye spacing from the centre line, height, dot size
 
 # control pill
 PILL_FILL = "#141519"
@@ -65,6 +71,9 @@ MAX_DRAFT = 500
 TICK_MS = 40
 TYPE_SPEED = 2  # characters revealed per tick (~50 per second)
 BLINK_TICKS = 12  # cursor blink period / 2
+POINTER_TICKS = 5  # sample the mouse pointer every 5th tick (~200 ms)
+Z_TICKS = 12  # the sleeping "z z z" gains one letter every 12 ticks (~0.5 s)
+Z_CYCLE = (1, 2, 3, 3, 3)  # letters shown over one cycle; it rests on the full "z z z"
 
 LAUNCHING = "Launching Capri…"  # shown while the Capri launcher checks the app stayed up
 BTN_Y = 602
@@ -138,6 +147,8 @@ class BabyAIDesktopWindow:
         self._shown = 0  # reply characters revealed so far
         self._target = 0  # reveal count at which the whole reply is visible
         self._thinking = False
+        self._think_since: float | None = None  # monotonic time the current wait began
+        self._think_text: str | None = None  # "THINKING… N s" once the wait gets long
         self._input_open = False
         self._tick_n = 0
         self._busy = False
@@ -147,6 +158,11 @@ class BabyAIDesktopWindow:
         self._drag: tuple[int, int] | None = None
         self._poll_id: str | None = None
         self._tick_id: str | None = None
+        self._timings = timings_from_config(getattr(assistant, "config", None))
+        self._clock = SleepClock(time.monotonic(), self._timings.sleep_after_s, self._timings.wake_radius_px)
+        self._last_pointer: tuple[int, int] | None = None
+        self._look = (0, 0)  # how far the eyes are slid toward the pointer, in pixels
+        self._face_drawn: tuple | None = None  # what the eyes and "z z z" currently show
 
         self._make_fonts()
         self._draw_figure()
@@ -243,7 +259,7 @@ class BabyAIDesktopWindow:
         """Floating stick-figure silhouette: halo, ink body, accent lines, head."""
         c = self.canvas
         cx = WIDTH // 2
-        head_y, head_r = 344, 26
+        head_y, head_r = HEAD_Y, HEAD_R
         neck_y = head_y + head_r
         shoulder_y = neck_y + 22
         hip_y = neck_y + 84
@@ -275,6 +291,62 @@ class BabyAIDesktopWindow:
             cx - head_r, head_y - head_r, cx + head_r, head_y + head_r,
             fill=HEAD_FILL, outline=INK, width=3, tags="figure",
         )
+        self._sync_face()
+
+    # -------------------------------------------------------- eyes, sleep, wake
+
+    def _face_state(self) -> tuple:
+        asleep = self._clock.asleep
+        letters = Z_CYCLE[(self._tick_n // Z_TICKS) % len(Z_CYCLE)] if asleep else 0
+        look_x, look_y = (0, 0) if asleep else self._look
+        return (asleep, letters, look_x, look_y)
+
+    def _sync_face(self) -> None:
+        """Redraw the eyes and the sleeping "z z z" only when what they show has changed."""
+        state = self._face_state()
+        if state != self._face_drawn:
+            self._face_drawn = state
+            self._draw_face(*state)
+
+    def _draw_face(self, asleep: bool, letters: int, look_x: int, look_y: int) -> None:
+        c = self.canvas
+        c.delete("face")
+        cx = WIDTH // 2
+        for side in (-1, 1):
+            ex, ey = cx + side * EYE_DX + look_x, HEAD_Y + EYE_DY + look_y
+            if asleep:  # closed eyes
+                c.create_line(ex - 5, ey, ex + 5, ey, fill=INK, width=3, capstyle="round", tags="face")
+            else:
+                c.create_oval(ex - EYE_R, ey - EYE_R, ex + EYE_R, ey + EYE_R, fill=INK, outline="", tags="face")
+        for i in range(letters):  # "z", "z z", "z z z" drifting up and out to the right of the head
+            c.create_text(cx + 38 + i * 14, HEAD_Y - 14 - i * 12, text="z", font=self.font_label, fill=CYAN, tags="face")
+
+    def _wake(self) -> None:
+        """A click, key press or reply counts as activity: wake up and restart the idle timer."""
+        self._clock.touch(time.monotonic())
+        self._sync_face()
+
+    def _presence_tick(self) -> None:
+        """Fall asleep after a long idle spell; wake when the pointer moves close to the head."""
+        now = time.monotonic()
+        if (self._busy or self._capri_busy) and not self._clock.manual:  # waiting on a reply is not idleness
+            self._clock.touch(now)
+        distance, moved = None, False
+        if self._tick_n % POINTER_TICKS == 0:
+            self._look = (0, 0)
+            try:
+                px, py = self.root.winfo_pointerxy()
+            except tk.TclError:
+                px = py = None
+            if px is not None:
+                head_x = self.root.winfo_rootx() + WIDTH // 2
+                head_y = self.root.winfo_rooty() + HEAD_Y
+                distance = math.hypot(px - head_x, py - head_y)
+                self._look = eye_offset(px - head_x, py - head_y, radius=self._timings.look_radius_px)
+                moved = self._last_pointer is not None and (px, py) != self._last_pointer
+                self._last_pointer = (px, py)
+        self._clock.tick(now, distance, moved)
+        self._sync_face()
 
     def _build_controls(self) -> None:
         c = self.canvas
@@ -332,6 +404,8 @@ class BabyAIDesktopWindow:
     def _set_reply(self, text: str, thinking: bool = False) -> None:
         self._reply = text
         self._thinking = thinking
+        self._think_since = time.monotonic() if thinking else None
+        self._think_text = None
         self._shown = 0  # the reply types itself out from the start
         self._render_bubble()
 
@@ -381,8 +455,12 @@ class BabyAIDesktopWindow:
 
         c.create_text(x0, y, anchor="nw", text=label, font=self.font_label, fill=RED, tags="bubble")
         if self._thinking:
+            tx = x0 + label_px
+            if self._think_text:
+                c.create_text(tx, y, anchor="nw", text=self._think_text, font=self.font_mono, fill=DIM, tags="bubble")
+                tx += self.font_mono.measure(self._think_text) + cw
             if blink_on:
-                self._block(x0 + label_px, y)
+                self._block(tx, y)
         else:
             remaining = self._shown
             for i, line in enumerate(lines):
@@ -410,8 +488,14 @@ class BabyAIDesktopWindow:
         if not self._thinking and self._shown < self._target:
             self._shown = min(self._target, self._shown + TYPE_SPEED)
             dirty = True
+        if self._thinking and self._think_since is not None:
+            text = thinking_label(time.monotonic() - self._think_since, self._timings.think_after_s)
+            if text != self._think_text:
+                self._think_text = text
+                dirty = True
         if self._tick_n % BLINK_TICKS == 0 and (self._input_open or self._thinking):
             dirty = True
+        self._presence_tick()
         if dirty:
             self._render_bubble()
         self._tick_id = self.root.after(TICK_MS, self._tick)
@@ -437,6 +521,7 @@ class BabyAIDesktopWindow:
         self.root.focus_set()
 
     def _on_key(self, event) -> str | None:
+        self._wake()
         if not self._input_open:
             return None
         if event.keysym in ("Return", "KP_Enter"):
@@ -488,12 +573,14 @@ class BabyAIDesktopWindow:
             while True:
                 self._set_reply(self._results.get_nowait())
                 self._busy = False
+                self._wake()
         except queue.Empty:
             pass
         try:
             while True:
                 self._set_reply(self._notices.get_nowait())
                 self._capri_busy = False
+                self._wake()
         except queue.Empty:
             pass
         self._poll_id = self.root.after(100, self._poll_results)
@@ -541,13 +628,16 @@ class BabyAIDesktopWindow:
         c.bind("<Key>", self._on_key)
 
         self.menu = tk.Menu(self.root, tearoff=0)
+        self.menu.add_command(label="Sleep", command=self._toggle_sleep)  # reads "Wake" while asleep
         self.menu.add_command(label="Quit BabyAI", command=self.close)
         c.bind("<Button-2>" if self._windowing == "aqua" else "<Button-3>", self._popup_menu)
 
+        self.root.bind("<Key>", lambda _event: self._wake(), add="+")  # keys that land on the window, not the canvas
         self.root.bind("<Escape>", self.close)  # Esc while typing is handled (and stopped) in _on_key
         self.root.bind("<Control-q>", self.close)
 
     def _start_drag(self, event) -> None:
+        self._wake()
         current = self.canvas.find_withtag("current")
         if current and "btn" in self.canvas.gettags(current[0]):
             self._drag = None  # a button press, not a window drag
@@ -561,7 +651,15 @@ class BabyAIDesktopWindow:
             return
         self.root.geometry(f"+{event.x_root - self._drag[0]}+{event.y_root - self._drag[1]}")
 
+    def _toggle_sleep(self) -> None:
+        if self._clock.asleep:
+            self._wake()
+        else:
+            self._clock.sleep()
+            self._sync_face()
+
     def _popup_menu(self, event) -> None:
+        self.menu.entryconfigure(0, label="Wake" if self._clock.asleep else "Sleep")
         try:
             self.menu.tk_popup(event.x_root, event.y_root)
         finally:

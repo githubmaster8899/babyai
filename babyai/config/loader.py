@@ -31,6 +31,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "safety": {
         "level": "strict",
     },
+    # Desktop overlay timings (used by `python3 -m babyai --desktop`); 0 turns auto-sleep off.
+    "ui": {
+        "think_after_s": 15,
+        "sleep_after_s": 600,
+        "wake_radius_px": 150,
+        "look_radius_px": 250,
+    },
 }
 
 
