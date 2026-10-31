@@ -7,6 +7,8 @@ Nothing here imports Tk, so the rules can be unit-tested without a display and
 from __future__ import annotations
 
 THINK_AFTER_S = 15.0  # show the "THINKING… N s" counter once a reply takes this long
+SLEEP_AFTER_S = 600.0  # idle time before the figure falls asleep (0 turns auto-sleep off)
+WAKE_RADIUS_PX = 150.0  # a pointer that moves this close to the figure's head wakes it
 
 
 def thinking_label(elapsed_s: float, after_s: float = THINK_AFTER_S) -> str | None:
@@ -17,3 +19,37 @@ def thinking_label(elapsed_s: float, after_s: float = THINK_AFTER_S) -> str | No
     if elapsed_s < after_s:
         return None
     return f"THINKING… {int(elapsed_s)} s"
+
+
+class SleepClock:
+    """Idle tracking and the asleep/awake state of the figure.
+
+    Time is always passed in (never read here), so tests can step it freely.
+    """
+
+    def __init__(self, now: float, sleep_after_s: float = SLEEP_AFTER_S, wake_radius_px: float = WAKE_RADIUS_PX):
+        self.sleep_after_s = sleep_after_s
+        self.wake_radius_px = wake_radius_px
+        self.last_activity = now
+        self.asleep = False
+
+    def touch(self, now: float) -> bool:
+        """Something happened (a click, a key, a reply). Returns True if it woke the figure."""
+        was_asleep = self.asleep
+        self.last_activity = now
+        self.asleep = False
+        return was_asleep
+
+    def tick(self, now: float, pointer_dist: float | None = None, pointer_moved: bool = False) -> bool:
+        """Advance the clock; returns whether the figure is asleep afterwards.
+
+        ``pointer_dist`` is the pointer's distance in pixels from the head (None if unknown).
+        A pointer that *moves* within the wake radius counts as activity and wakes the figure;
+        one that merely rests there does not, otherwise a parked mouse would keep waking it.
+        """
+        near = pointer_dist is not None and pointer_dist <= self.wake_radius_px
+        if near and pointer_moved:
+            self.touch(now)
+        elif not self.asleep and self.sleep_after_s > 0 and now - self.last_activity >= self.sleep_after_s:
+            self.asleep = True
+        return self.asleep

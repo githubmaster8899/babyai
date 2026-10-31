@@ -1,7 +1,7 @@
 import unittest
 
 from babyai.ui import behavior
-from babyai.ui.behavior import thinking_label
+from babyai.ui.behavior import SleepClock, thinking_label
 
 
 class ThinkingLabelTests(unittest.TestCase):
@@ -21,6 +21,69 @@ class ThinkingLabelTests(unittest.TestCase):
 
     def test_default_threshold_is_about_fifteen_seconds(self):
         self.assertEqual(behavior.THINK_AFTER_S, 15.0)
+
+
+class SleepClockTests(unittest.TestCase):
+    def test_awake_at_start_and_before_the_threshold(self):
+        clock = SleepClock(now=100, sleep_after_s=600)
+        self.assertFalse(clock.asleep)
+        self.assertFalse(clock.tick(699.9))
+
+    def test_falls_asleep_once_idle_long_enough(self):
+        clock = SleepClock(now=100, sleep_after_s=600)
+        self.assertTrue(clock.tick(700))
+        self.assertTrue(clock.asleep)
+        self.assertTrue(clock.tick(701))  # and stays asleep
+
+    def test_activity_restarts_the_idle_timer(self):
+        clock = SleepClock(now=0, sleep_after_s=600)
+        self.assertFalse(clock.touch(500))  # was awake, so nothing was woken
+        self.assertFalse(clock.tick(1000))  # only 500 s since the touch
+        self.assertTrue(clock.tick(1100))
+
+    def test_touch_wakes_a_sleeping_figure(self):
+        clock = SleepClock(now=0, sleep_after_s=600)
+        clock.tick(700)
+        self.assertTrue(clock.touch(710))  # True = it was asleep
+        self.assertFalse(clock.asleep)
+        self.assertFalse(clock.tick(711))
+        self.assertTrue(clock.tick(1310))  # a new idle period has to pass first
+
+    def test_pointer_moving_close_wakes_it(self):
+        clock = SleepClock(now=0, sleep_after_s=600, wake_radius_px=150)
+        clock.tick(700)
+        self.assertFalse(clock.tick(701, pointer_dist=100, pointer_moved=True))
+
+    def test_pointer_resting_close_does_not_wake_it(self):
+        clock = SleepClock(now=0, sleep_after_s=600, wake_radius_px=150)
+        clock.tick(700)
+        self.assertTrue(clock.tick(701, pointer_dist=100, pointer_moved=False))
+
+    def test_pointer_moving_far_away_or_unknown_does_not_wake_it(self):
+        clock = SleepClock(now=0, sleep_after_s=600, wake_radius_px=150)
+        clock.tick(700)
+        self.assertTrue(clock.tick(701, pointer_dist=151, pointer_moved=True))
+        self.assertTrue(clock.tick(702, pointer_dist=None, pointer_moved=True))
+
+    def test_pointer_near_the_edge_of_the_radius_counts(self):
+        clock = SleepClock(now=0, sleep_after_s=600, wake_radius_px=150)
+        clock.tick(700)
+        self.assertFalse(clock.tick(701, pointer_dist=150, pointer_moved=True))
+
+    def test_pointer_moving_nearby_keeps_an_awake_figure_awake(self):
+        clock = SleepClock(now=0, sleep_after_s=600, wake_radius_px=150)
+        clock.tick(590, pointer_dist=50, pointer_moved=True)  # restarts the idle timer
+        self.assertFalse(clock.tick(1000))
+        self.assertTrue(clock.tick(1190))
+
+    def test_zero_turns_auto_sleep_off(self):
+        clock = SleepClock(now=0, sleep_after_s=0)
+        self.assertFalse(clock.tick(10**9))
+
+    def test_defaults_are_ten_minutes_and_150_px(self):
+        clock = SleepClock(now=0)
+        self.assertEqual(clock.sleep_after_s, 600.0)
+        self.assertEqual(clock.wake_radius_px, 150.0)
 
 
 if __name__ == "__main__":
