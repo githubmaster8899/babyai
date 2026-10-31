@@ -29,7 +29,7 @@ import tkinter as tk
 from tkinter import font as tkfont
 from typing import TYPE_CHECKING
 
-from babyai.ui.behavior import SleepClock, eye_offset, thinking_label
+from babyai.ui.behavior import SleepClock, eye_offset, thinking_label, timings_from_config
 
 if TYPE_CHECKING:  # the UI only relies on the assistant's public methods at runtime
     from babyai.agent.core import BabyAI
@@ -158,7 +158,8 @@ class BabyAIDesktopWindow:
         self._drag: tuple[int, int] | None = None
         self._poll_id: str | None = None
         self._tick_id: str | None = None
-        self._clock = SleepClock(time.monotonic())  # idle tracking: when the figure falls asleep / wakes
+        self._timings = timings_from_config(getattr(assistant, "config", None))
+        self._clock = SleepClock(time.monotonic(), self._timings.sleep_after_s, self._timings.wake_radius_px)
         self._last_pointer: tuple[int, int] | None = None
         self._look = (0, 0)  # how far the eyes are slid toward the pointer, in pixels
         self._face_drawn: tuple | None = None  # what the eyes and "z z z" currently show
@@ -341,7 +342,7 @@ class BabyAIDesktopWindow:
                 head_x = self.root.winfo_rootx() + WIDTH // 2
                 head_y = self.root.winfo_rooty() + HEAD_Y
                 distance = math.hypot(px - head_x, py - head_y)
-                self._look = eye_offset(px - head_x, py - head_y)
+                self._look = eye_offset(px - head_x, py - head_y, radius=self._timings.look_radius_px)
                 moved = self._last_pointer is not None and (px, py) != self._last_pointer
                 self._last_pointer = (px, py)
         self._clock.tick(now, distance, moved)
@@ -488,7 +489,7 @@ class BabyAIDesktopWindow:
             self._shown = min(self._target, self._shown + TYPE_SPEED)
             dirty = True
         if self._thinking and self._think_since is not None:
-            text = thinking_label(time.monotonic() - self._think_since)
+            text = thinking_label(time.monotonic() - self._think_since, self._timings.think_after_s)
             if text != self._think_text:
                 self._think_text = text
                 dirty = True

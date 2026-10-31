@@ -1,7 +1,11 @@
+import math
+import os
+import tempfile
 import unittest
 
+from babyai.config.loader import DEFAULT_CONFIG, load_config
 from babyai.ui import behavior
-from babyai.ui.behavior import SleepClock, eye_offset, thinking_label
+from babyai.ui.behavior import SleepClock, UiTimings, eye_offset, thinking_label, timings_from_config
 
 
 class ThinkingLabelTests(unittest.TestCase):
@@ -147,6 +151,43 @@ class ManualSleepTests(unittest.TestCase):
         clock = SleepClock(now=0, sleep_after_s=0)
         clock.sleep()
         self.assertTrue(clock.tick(10**6))
+
+
+class UiTimingsTests(unittest.TestCase):
+    def test_default_config_matches_the_built_in_timings(self):
+        # keeps today's behaviour: nothing changes unless config.toml says so
+        self.assertEqual(timings_from_config(DEFAULT_CONFIG), UiTimings())
+        self.assertEqual(UiTimings().think_after_s, 15.0)
+        self.assertEqual(UiTimings().sleep_after_s, 600.0)
+        self.assertEqual(UiTimings().wake_radius_px, 150.0)
+        self.assertEqual(UiTimings().look_radius_px, 250.0)
+
+    def test_values_in_the_ui_section_are_used(self):
+        config = {"ui": {"think_after_s": 5, "sleep_after_s": 60.5, "wake_radius_px": 90, "look_radius_px": 400}}
+        self.assertEqual(timings_from_config(config), UiTimings(5.0, 60.5, 90.0, 400.0))
+
+    def test_zero_is_allowed_and_turns_auto_sleep_off(self):
+        self.assertEqual(timings_from_config({"ui": {"sleep_after_s": 0}}).sleep_after_s, 0.0)
+
+    def test_missing_or_malformed_config_falls_back_to_defaults(self):
+        for config in (None, {}, {"ui": None}, {"ui": "fast"}, {"ui": []}, "nonsense", 42):
+            self.assertEqual(timings_from_config(config), UiTimings(), config)
+
+    def test_bad_individual_values_fall_back_one_by_one(self):
+        config = {"ui": {"think_after_s": "soon", "sleep_after_s": -5, "wake_radius_px": True, "look_radius_px": 123}}
+        self.assertEqual(timings_from_config(config), UiTimings(look_radius_px=123.0))
+
+    def test_not_finite_numbers_are_rejected(self):
+        config = {"ui": {"sleep_after_s": math.nan, "look_radius_px": math.inf}}
+        self.assertEqual(timings_from_config(config), UiTimings())
+
+    def test_a_config_toml_can_override_them(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "config.toml")
+            with open(path, "w") as handle:
+                handle.write("[ui]\nsleep_after_s = 120\nlook_radius_px = 300\n")
+            timings = timings_from_config(load_config(path))
+        self.assertEqual(timings, UiTimings(sleep_after_s=120.0, look_radius_px=300.0))
 
 
 if __name__ == "__main__":

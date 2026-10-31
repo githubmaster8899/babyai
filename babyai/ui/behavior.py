@@ -7,6 +7,7 @@ Nothing here imports Tk, so the rules can be unit-tested without a display and
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 THINK_AFTER_S = 15.0  # show the "THINKING… N s" counter once a reply takes this long
 SLEEP_AFTER_S = 600.0  # idle time before the figure falls asleep (0 turns auto-sleep off)
@@ -84,3 +85,29 @@ def eye_offset(
         return (0, 0)
     strength = min(1.0, dist / full_at)
     return (round(dx / dist * strength * reach[0]), round(dy / dist * strength * reach[1]))
+
+
+@dataclass(frozen=True)
+class UiTimings:
+    think_after_s: float = THINK_AFTER_S
+    sleep_after_s: float = SLEEP_AFTER_S
+    wake_radius_px: float = WAKE_RADIUS_PX
+    look_radius_px: float = LOOK_RADIUS_PX
+
+
+def timings_from_config(config: object) -> UiTimings:
+    """Read the ``[ui]`` section of the BabyAI config.
+
+    Anything missing, not a plain number, negative or not finite falls back to the default,
+    so a typo in config.toml can never break the overlay.
+    """
+    section = config.get("ui") if isinstance(config, dict) else None
+    if not isinstance(section, dict):
+        return UiTimings()
+    defaults = UiTimings()
+    values = {}
+    for name in ("think_after_s", "sleep_after_s", "wake_radius_px", "look_radius_px"):
+        value = section.get(name)
+        ok = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0
+        values[name] = float(value) if ok else getattr(defaults, name)
+    return UiTimings(**values)
