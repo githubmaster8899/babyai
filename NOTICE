@@ -9,3 +9,8 @@ noncommercial purposes only, and any copy you share must keep
 capri/LICENSE.md and the notice below.
 
 Required Notice: Copyright 2026 Lachy (https://github.com/lachydotmcg)
+
+Third-party code under vendor/ keeps its own license, found in each folder
+(vendor/<name>/LICENSE and vendor/<name>/UPSTREAM.md). It is not covered by
+BabyAI's MIT license, and the terms differ per folder (some are
+noncommercial only).
