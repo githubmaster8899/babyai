@@ -37,12 +37,19 @@ class SleepClock:
         self.wake_radius_px = wake_radius_px
         self.last_activity = now
         self.asleep = False
+        self.manual = False  # put to sleep on purpose (menu): only a click, key or the menu wakes it
+
+    def sleep(self) -> None:
+        """Put the figure to sleep on purpose. A passing pointer will not wake it."""
+        self.asleep = True
+        self.manual = True
 
     def touch(self, now: float) -> bool:
         """Something happened (a click, a key, a reply). Returns True if it woke the figure."""
         was_asleep = self.asleep
         self.last_activity = now
         self.asleep = False
+        self.manual = False
         return was_asleep
 
     def tick(self, now: float, pointer_dist: float | None = None, pointer_moved: bool = False) -> bool:
@@ -53,7 +60,7 @@ class SleepClock:
         one that merely rests there does not, otherwise a parked mouse would keep waking it.
         """
         near = pointer_dist is not None and pointer_dist <= self.wake_radius_px
-        if near and pointer_moved:
+        if near and pointer_moved and not self.manual:
             self.touch(now)
         elif not self.asleep and self.sleep_after_s > 0 and now - self.last_activity >= self.sleep_after_s:
             self.asleep = True

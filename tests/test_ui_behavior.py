@@ -117,5 +117,37 @@ class EyeOffsetTests(unittest.TestCase):
         self.assertEqual(eye_offset(90, 0, radius=100, reach=(10, 5), full_at=90), (10, 0))
 
 
+class ManualSleepTests(unittest.TestCase):
+    def test_sleep_puts_the_figure_to_sleep_straight_away(self):
+        clock = SleepClock(now=0, sleep_after_s=600)
+        clock.sleep()
+        self.assertTrue(clock.asleep)
+        self.assertTrue(clock.tick(1))
+
+    def test_a_passing_pointer_does_not_wake_a_manual_sleep(self):
+        clock = SleepClock(now=0, sleep_after_s=600, wake_radius_px=150)
+        clock.sleep()
+        self.assertTrue(clock.tick(1, pointer_dist=10, pointer_moved=True))
+
+    def test_a_click_or_key_wakes_a_manual_sleep(self):
+        clock = SleepClock(now=0, sleep_after_s=600)
+        clock.sleep()
+        self.assertTrue(clock.touch(5))  # it was asleep
+        self.assertFalse(clock.asleep)
+
+    def test_after_waking_the_pointer_works_again(self):
+        clock = SleepClock(now=0, sleep_after_s=600, wake_radius_px=150)
+        clock.sleep()
+        clock.touch(5)
+        clock.tick(700)  # idle again -> ordinary sleep
+        self.assertTrue(clock.asleep)
+        self.assertFalse(clock.tick(701, pointer_dist=10, pointer_moved=True))
+
+    def test_manual_sleep_stays_on_with_auto_sleep_disabled(self):
+        clock = SleepClock(now=0, sleep_after_s=0)
+        clock.sleep()
+        self.assertTrue(clock.tick(10**6))
+
+
 if __name__ == "__main__":
     unittest.main()

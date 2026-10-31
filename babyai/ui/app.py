@@ -328,7 +328,7 @@ class BabyAIDesktopWindow:
     def _presence_tick(self) -> None:
         """Fall asleep after a long idle spell; wake when the pointer moves close to the head."""
         now = time.monotonic()
-        if self._busy or self._capri_busy:  # waiting on a reply or on Capri is not idleness
+        if (self._busy or self._capri_busy) and not self._clock.manual:  # waiting on a reply is not idleness
             self._clock.touch(now)
         distance, moved = None, False
         if self._tick_n % POINTER_TICKS == 0:
@@ -627,6 +627,7 @@ class BabyAIDesktopWindow:
         c.bind("<Key>", self._on_key)
 
         self.menu = tk.Menu(self.root, tearoff=0)
+        self.menu.add_command(label="Sleep", command=self._toggle_sleep)  # reads "Wake" while asleep
         self.menu.add_command(label="Quit BabyAI", command=self.close)
         c.bind("<Button-2>" if self._windowing == "aqua" else "<Button-3>", self._popup_menu)
 
@@ -649,7 +650,15 @@ class BabyAIDesktopWindow:
             return
         self.root.geometry(f"+{event.x_root - self._drag[0]}+{event.y_root - self._drag[1]}")
 
+    def _toggle_sleep(self) -> None:
+        if self._clock.asleep:
+            self._wake()
+        else:
+            self._clock.sleep()
+            self._sync_face()
+
     def _popup_menu(self, event) -> None:
+        self.menu.entryconfigure(0, label="Wake" if self._clock.asleep else "Sleep")
         try:
             self.menu.tk_popup(event.x_root, event.y_root)
         finally:
