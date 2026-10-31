@@ -23,9 +23,12 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 import tkinter as tk
 from tkinter import font as tkfont
 from typing import TYPE_CHECKING
+
+from babyai.ui.behavior import thinking_label
 
 if TYPE_CHECKING:  # the UI only relies on the assistant's public methods at runtime
     from babyai.agent.core import BabyAI
@@ -138,6 +141,8 @@ class BabyAIDesktopWindow:
         self._shown = 0  # reply characters revealed so far
         self._target = 0  # reveal count at which the whole reply is visible
         self._thinking = False
+        self._think_since: float | None = None  # monotonic time the current wait began
+        self._think_text: str | None = None  # "THINKING… N s" once the wait gets long
         self._input_open = False
         self._tick_n = 0
         self._busy = False
@@ -332,6 +337,8 @@ class BabyAIDesktopWindow:
     def _set_reply(self, text: str, thinking: bool = False) -> None:
         self._reply = text
         self._thinking = thinking
+        self._think_since = time.monotonic() if thinking else None
+        self._think_text = None
         self._shown = 0  # the reply types itself out from the start
         self._render_bubble()
 
@@ -381,8 +388,12 @@ class BabyAIDesktopWindow:
 
         c.create_text(x0, y, anchor="nw", text=label, font=self.font_label, fill=RED, tags="bubble")
         if self._thinking:
+            tx = x0 + label_px
+            if self._think_text:
+                c.create_text(tx, y, anchor="nw", text=self._think_text, font=self.font_mono, fill=DIM, tags="bubble")
+                tx += self.font_mono.measure(self._think_text) + cw
             if blink_on:
-                self._block(x0 + label_px, y)
+                self._block(tx, y)
         else:
             remaining = self._shown
             for i, line in enumerate(lines):
@@ -410,6 +421,11 @@ class BabyAIDesktopWindow:
         if not self._thinking and self._shown < self._target:
             self._shown = min(self._target, self._shown + TYPE_SPEED)
             dirty = True
+        if self._thinking and self._think_since is not None:
+            text = thinking_label(time.monotonic() - self._think_since)
+            if text != self._think_text:
+                self._think_text = text
+                dirty = True
         if self._tick_n % BLINK_TICKS == 0 and (self._input_open or self._thinking):
             dirty = True
         if dirty:
