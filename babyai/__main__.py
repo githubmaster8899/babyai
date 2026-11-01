@@ -10,8 +10,19 @@ def main(argv=None):
     parser.add_argument("--no-voice", action="store_true", help="Disable voice mode")
     parser.add_argument("--desktop", action="store_true", help="Launch the floating desktop overlay (needs Tk)")
     parser.add_argument("--capri", action="store_true", help="Launch the built Capri companion app from capri/ and exit; if it can't start, carry on as usual")
+    parser.add_argument(
+        "--serve-capri",
+        action="store_true",
+        help="Be the brain of the Capri app: serve BabyAI on 127.0.0.1:11434 (Capri is not modified). With --capri, also start Capri and stop when it closes",
+    )
+    parser.add_argument("--capri-port", type=int, default=11434, help="Port for --serve-capri (Capri itself always expects 11434)")
     parser.add_argument("command", nargs="?", help="Run a single text command instead of interactive mode")
     args = parser.parse_args(argv)
+
+    if args.serve_capri:
+        from babyai.capri_brain import serve_capri
+
+        return serve_capri(args.config, port=args.capri_port, launch=args.capri)
 
     if args.capri:
         from babyai.capri_launcher import launch_capri

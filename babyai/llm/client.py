@@ -11,12 +11,20 @@ class LLMClient:
         self.api_key = api_key
         self.timeout = timeout
 
-    def complete(self, messages: list[dict[str, str]], tools: list[dict[str, Any]] | None = None, stream: bool = False) -> dict[str, Any]:
+    def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        stream: bool = False,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         payload = {
             "model": self.model,
             "messages": messages,
             "stream": stream,
         }
+        if extra:  # optional sampling settings such as max_tokens / temperature
+            payload.update(extra)
         if tools:
             payload["tools"] = tools
 
