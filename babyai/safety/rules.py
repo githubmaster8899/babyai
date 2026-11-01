@@ -73,4 +73,6 @@ def get_risk_level(tool_name: str, arguments: dict | None = None) -> RiskLevel:
         return RiskLevel.CRITICAL
     if tool_name in {"get_clipboard", "set_clipboard"}:
         return RiskLevel.HIGH
+    if tool_name == "power" and str(args.get("action", "")).lower() in {"shut_down", "restart", "sign_out"}:
+        return RiskLevel.HIGH  # Capri's power tool: these can lose unsaved work (lock, sleep and cancel are harmless)
     return base
