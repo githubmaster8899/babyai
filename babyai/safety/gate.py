@@ -55,6 +55,19 @@ class SafetyGate:
         self._record(tool_name, risk_level, "allow", "No restriction triggered", args)
         return {"allowed": True, "decision": "allow", "needs_confirmation": False, "risk_level": risk_level, "reason": "No restriction triggered"}
 
+    def record_confirmation(self, tool_name: str, arguments: dict[str, Any] | None, approved: bool) -> None:
+        """Audit what the user answered when a call needed confirmation."""
+        risk_level = get_risk_level(tool_name, arguments or {})
+        entry = AuditEntry(
+            tool_name=tool_name,
+            risk_level=str(risk_level),
+            decision="approved" if approved else "declined",
+            reason="User answered the confirmation prompt",
+            user_confirmation=approved,
+            metadata=arguments or {},
+        )
+        self.audit_log.append(entry)
+
     def approve(self, tool_name: str, arguments: dict[str, Any] | None = None) -> bool:
         result = self.check(tool_name, arguments, interactive=False)
         return result["allowed"] or result["decision"] == "needs_confirmation"
