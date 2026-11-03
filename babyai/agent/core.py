@@ -41,7 +41,8 @@ class BabyAI:
 
     def cli_confirm(self, name: str, arguments: dict[str, Any], verdict: dict[str, Any]) -> bool:
         shown = ", ".join(f"{key}={str(value)[:80]!r}" for key, value in arguments.items()) or "no arguments"
-        print(f"BabyAI wants to run {name} ({verdict.get('risk_level')}): {shown}")
+        risk = verdict.get("risk_level")
+        print(f"BabyAI wants to run {name} ({getattr(risk, 'value', risk)}): {shown}")
         try:
             return input("Allow? [y/N] ").strip().lower() in {"y", "yes"}
         except EOFError:

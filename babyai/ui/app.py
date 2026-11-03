@@ -1,13 +1,21 @@
-"""Floating desktop overlay for BabyAI (Tkinter).
+"""Floating desktop overlay for BabyAI (Tkinter) - Capri's body with BabyAI's brain.
 
-A borderless, always-on-top assistant silhouette with a terminal-style speech
-bubble and a small control pill:
+A borderless, always-on-top companion with a terminal-style speech bubble and a
+small control pill. It is one Python app: the character is Capri's own sprites and
+animation rules (babyai.ui.capri_body / babyai.ui.sprites, from capri/assets), and
+everything she says and does goes through BabyAI (LLM, memory, tools, safety gate).
+No separate Capri process is involved.
 
-* the bubble is a transcript: a dim ``> you:`` line, then the assistant's reply
-  in monospace that types itself out; your own typing appears inline on the
-  ``> you:`` line, so there is no separate input box;
-* pencil = type a message, wave = voice input, chip = launch the separate
-  Capri app (see babyai.capri_launcher).
+* the bubble is a transcript: a dim ``> you:`` line, then her reply in monospace
+  that types itself out at Capri's 28 letters a second while her mouth follows the
+  letters; your own typing appears inline on the ``> you:`` line, so there is no
+  separate input box;
+* pencil = type a message, wave = voice input; stroke the pointer back and forth
+  over her to pet her; right-click for Sleep / Wake / Quit;
+* when a tool call needs your say-so (the safety gate), the bubble asks and you
+  answer Y / N or click.
+* without the sprite files (or with ``[ui] character = "stick"``) a stick-figure
+  silhouette is drawn instead.
 
 Transparency depends on the platform / compositor:
 
@@ -30,6 +38,9 @@ from tkinter import font as tkfont
 from typing import TYPE_CHECKING
 
 from babyai.ui.behavior import SleepClock, eye_offset, thinking_label, timings_from_config
+from babyai.ui.capri_body import CLIPS, Animator, PetDetector, letters_revealed, mouth_cell, pet_line
+from babyai.ui.persona import apply_character
+from babyai.ui.sprites import DEFAULT_SCALE, SpriteBank
 
 if TYPE_CHECKING:  # the UI only relies on the assistant's public methods at runtime
     from babyai.agent.core import BabyAI
@@ -62,21 +73,24 @@ PILL_EDGE = "#464952"
 PILL_HOVER = "#2a2d36"
 ICON = "#ffffff"
 
-BUBBLE_L, BUBBLE_R, BUBBLE_BOTTOM = 60, 500, 290  # the bubble grows upward from its bottom edge
+BUBBLE_L, BUBBLE_R, BUBBLE_BOTTOM = 60, 500, 290  # the bubble grows upward from its bottom edge (stick figure)
+SPRITE_BOTTOM = 576  # canvas y of the bottom edge of her sprite frame
+SPRITE_HAIR = 0.10  # fraction of the frame above the top of her hair
 TAIL = 16
 MAX_LINES = 8
 MAX_CHARS = 420
 MAX_DRAFT = 500
 
 TICK_MS = 40
-TYPE_SPEED = 2  # characters revealed per tick (~50 per second)
 BLINK_TICKS = 12  # cursor blink period / 2
 POINTER_TICKS = 5  # sample the mouse pointer every 5th tick (~200 ms)
 Z_TICKS = 12  # the sleeping "z z z" gains one letter every 12 ticks (~0.5 s)
 Z_CYCLE = (1, 2, 3, 3, 3)  # letters shown over one cycle; it rests on the full "z z z"
 
-LAUNCHING = "Launching Capri…"  # shown while the Capri launcher checks the app stayed up
 BTN_Y = 602
+PET_DELAY_S = 1.3  # she grins first, then says a pet line
+CONFIRM_TIMEOUT_S = 60  # an unanswered confirmation counts as "no"
+LOADING = "Loading… (first run builds a sprite cache, about 20 s)"
 
 
 def _lerp(a: float, b: float, t: float) -> float:
@@ -152,23 +166,37 @@ class BabyAIDesktopWindow:
         self._input_open = False
         self._tick_n = 0
         self._busy = False
-        self._capri_busy = False
         self._results: queue.Queue[str] = queue.Queue()
-        self._notices: queue.Queue[str] = queue.Queue()
+        self._confirm_requests: queue.Queue[dict] = queue.Queue()
+        self._confirm: dict | None = None  # the confirmation being asked right now
         self._drag: tuple[int, int] | None = None
+        self._pressed = False
         self._poll_id: str | None = None
         self._tick_id: str | None = None
         self._timings = timings_from_config(getattr(assistant, "config", None))
         self._clock = SleepClock(time.monotonic(), self._timings.sleep_after_s, self._timings.wake_radius_px)
         self._last_pointer: tuple[int, int] | None = None
         self._look = (0, 0)  # how far the eyes are slid toward the pointer, in pixels
-        self._face_drawn: tuple | None = None  # what the eyes and "z z z" currently show
+        self._face_drawn: tuple | None = None  # what the stick figure's eyes and "z z z" currently show
+        self._reveal_start = time.monotonic()  # when the current reply began typing out
+        self._name = apply_character(assistant)
+        self._sprites: SpriteBank | None = None  # Capri's sprites; None -> stick figure
+        self._animator: Animator | None = None
+        self._body_drawn: tuple | None = None  # (clip, cell, mouth) currently on the canvas
+        self._body_item = self._mouth_item = 0
+        self._pet = PetDetector()  # re-made with a scaled step once the sprites are loaded
+        self._pet_count = 0
+        self._pet_due: float | None = None
+        self._bubble_bottom = BUBBLE_BOTTOM
 
         self._make_fonts()
+        self._load_character()
+        self._clock.touch(time.monotonic())  # a slow first load must not count as idle time
         self._draw_figure()
         self._build_controls()
         self._bind_events()
-        self._set_reply(f"Hi, I'm {self._assistant_name()}. Pencil to type, wave to talk, chip to launch Capri.")
+        self.assistant.confirm = self._confirm_from_worker  # the safety gate asks through the bubble
+        self._set_reply(f"Hi, I'm {self._name}. Pencil to type, wave to talk.")
         self._poll_results()
         self._tick()
 
@@ -240,10 +268,30 @@ class BabyAIDesktopWindow:
         self.line_h = self.font_mono.metrics("linespace") + 5
 
     def _assistant_name(self) -> str:
-        try:
-            return str(self.assistant.config.get("agent", {}).get("name", "BabyAI"))
-        except Exception:
-            return "BabyAI"
+        return self._name
+
+    def _load_character(self) -> None:
+        """Load Capri's sprites if they are there; otherwise the stick figure is drawn."""
+        ui = (getattr(self.assistant, "config", None) or {}).get("ui", {})
+        if str(ui.get("character", "capri")).strip().lower() != "capri":
+            return
+        bank = SpriteBank(self.root, scale=ui.get("sprite_scale", DEFAULT_SCALE))
+        if not bank.available():
+            print("Capri's sprites were not found under capri/assets/sprites; using the stick figure.")
+            return
+        clips = tuple(CLIPS)
+        if not bank.cached(clips):
+            print("Preparing Capri's sprites (first run only, about 20 seconds)...")
+        self.canvas.create_text(WIDTH // 2, 330, text=LOADING, fill=DIM, font=self.font_mono, tags="loading")
+        self.root.update()  # show the window before the (possibly slow) first load
+        missing = bank.preload(clips)
+        self.canvas.delete("loading")
+        if any(name in missing for name in ("idle", "blink", "mouth")):
+            print("Capri's sprites could not be loaded; using the stick figure.")
+            return
+        self._sprites = bank
+        self._animator = Animator(time.monotonic())
+        self._pet = PetDetector(min_step_px=max(3.0, 6.0 * bank.zoom / bank.sub))
 
     # ----------------------------------------------------------------- drawing
 
@@ -256,6 +304,50 @@ class BabyAIDesktopWindow:
         return self.canvas.create_polygon(points, smooth=True, **kw)
 
     def _draw_figure(self) -> None:
+        if self._sprites is None:
+            self._draw_stick_figure()
+            return
+        width, height = self._sprites.cell_size
+        # The bubble's tail points at the top of her hair, whatever the sprite scale is.
+        self._bubble_bottom = SPRITE_BOTTOM - height + int(height * SPRITE_HAIR) - TAIL - 4
+        self._body_item = self.canvas.create_image(WIDTH // 2, SPRITE_BOTTOM, anchor="s", tags="figure")
+        self._mouth_item = self.canvas.create_image(WIDTH // 2, SPRITE_BOTTOM, anchor="s", tags="figure")
+        self._update_body(time.monotonic())
+
+    def _speaking(self) -> bool:
+        return bool(self._reply) and not self._thinking and self._shown < self._target
+
+    def _update_body(self, now: float) -> None:
+        """Advance Capri's animation and redraw her only when the frame (or her breathing) changed."""
+        if self._sprites is None or self._animator is None:
+            return
+        animator, bank, c = self._animator, self._sprites, self.canvas
+        animator.set_asleep(self._clock.asleep, now)
+        speaking = self._speaking()
+        mouth = mouth_cell(self._reply, now - self._reveal_start) if speaking else -1
+        quiet = not (speaking or self._thinking or self._input_open or self._confirm)
+        frame = animator.frame(now, quiet, mouth)
+        key = (frame.clip, frame.cell, frame.mouth)
+        if key != self._body_drawn:
+            self._body_drawn = key
+            body = bank.cell(frame.clip, frame.cell)
+            if body is not None:
+                c.itemconfigure(self._body_item, image=body)
+            jaw = bank.cell("mouth", frame.mouth) if frame.mouth >= 0 else None
+            c.itemconfigure(self._mouth_item, image=jaw if jaw is not None else "")
+        y = SPRITE_BOTTOM + round(frame.breathe * bank.zoom / bank.sub)
+        c.coords(self._body_item, WIDTH // 2, y)
+        c.coords(self._mouth_item, WIDTH // 2, y)
+
+    def _body_hit(self, x: int, y: int) -> bool:
+        """Is the pointer over her (not over the see-through part of her frame)?"""
+        if self._sprites is None or self._body_drawn is None:
+            return False
+        width, height = self._sprites.cell_size
+        clip, cell, _mouth = self._body_drawn
+        return self._sprites.is_opaque(clip, cell, x - (WIDTH - width) // 2, y - (SPRITE_BOTTOM - height))
+
+    def _draw_stick_figure(self) -> None:
         """Floating stick-figure silhouette: halo, ink body, accent lines, head."""
         c = self.canvas
         cx = WIDTH // 2
@@ -302,7 +394,10 @@ class BabyAIDesktopWindow:
         return (asleep, letters, look_x, look_y)
 
     def _sync_face(self) -> None:
-        """Redraw the eyes and the sleeping "z z z" only when what they show has changed."""
+        """Redraw the stick figure's eyes and sleeping "z z z" only when what they show has changed.
+        (Capri's sprites draw their own eyes and sleep, so this is for the stick figure only.)"""
+        if self._sprites is not None:
+            return
         state = self._face_state()
         if state != self._face_drawn:
             self._face_drawn = state
@@ -329,7 +424,7 @@ class BabyAIDesktopWindow:
     def _presence_tick(self) -> None:
         """Fall asleep after a long idle spell; wake when the pointer moves close to the head."""
         now = time.monotonic()
-        if (self._busy or self._capri_busy) and not self._clock.manual:  # waiting on a reply is not idleness
+        if self._busy and not self._clock.manual:  # waiting on a reply is not idleness
             self._clock.touch(now)
         distance, moved = None, False
         if self._tick_n % POINTER_TICKS == 0:
@@ -351,12 +446,11 @@ class BabyAIDesktopWindow:
     def _build_controls(self) -> None:
         c = self.canvas
         cx = WIDTH // 2
-        x1, x2 = cx - 73, cx + 27
+        x1, x2 = cx - 50, cx + 50
         self._rounded_rect(x1, BTN_Y - 18, x2, BTN_Y + 18, 18, fill=PILL_FILL, outline=PILL_EDGE, width=2, tags="pill")
         c.create_line((x1 + x2) / 2, BTN_Y - 9, (x1 + x2) / 2, BTN_Y + 9, fill=PILL_EDGE, width=1, tags="pill")
         self._make_button(x1 + 25, BTN_Y, "pencil", self._toggle_input, self._draw_pencil, r=15)
         self._make_button(x2 - 25, BTN_Y, "voice", self._on_mic, self._draw_wave, r=15)
-        self._make_button(cx + 55, BTN_Y, "capri", self._on_capri, self._draw_chip, r=18, ring=True)
 
     def _make_button(self, x: float, y: float, name: str, command, draw_icon, r: int, ring: bool = False) -> None:
         c = self.canvas
@@ -389,16 +483,6 @@ class BabyAIDesktopWindow:
         for dx, half in ((-8, 3), (-4, 7), (0, 11), (4, 7), (8, 3)):
             self.canvas.create_line(x + dx, y - half, x + dx, y + half, fill=CYAN, width=2, capstyle="round", tags=tags)
 
-    def _draw_chip(self, x: float, y: float, tags) -> None:
-        c = self.canvas
-        c.create_rectangle(x - 8, y - 8, x + 8, y + 8, outline=ICON, width=2, tags=tags)
-        c.create_rectangle(x - 3, y - 3, x + 3, y + 3, fill=ACCENT, outline="", tags=tags)
-        for d in (-4, 4):  # pins on all four sides
-            c.create_line(x + d, y - 12, x + d, y - 8, fill=ICON, width=2, tags=tags)
-            c.create_line(x + d, y + 8, x + d, y + 12, fill=ICON, width=2, tags=tags)
-            c.create_line(x - 12, y + d, x - 8, y + d, fill=ICON, width=2, tags=tags)
-            c.create_line(x + 8, y + d, x + 12, y + d, fill=ICON, width=2, tags=tags)
-
     # ------------------------------------------------------------ speech bubble
 
     def _set_reply(self, text: str, thinking: bool = False) -> None:
@@ -407,11 +491,14 @@ class BabyAIDesktopWindow:
         self._think_since = time.monotonic() if thinking else None
         self._think_text = None
         self._shown = 0  # the reply types itself out from the start
+        self._reveal_start = time.monotonic()
+        if self._animator is not None and text and not thinking:
+            self._animator.speak(self._reveal_start)  # talking cuts off a sleep, glitch or grin
         self._render_bubble()
 
     def _render_bubble(self) -> None:
         """Redraw the transcript bubble. It is laid out from y=0, then moved so its
-        bottom edge sits on BUBBLE_BOTTOM (it grows upward, tail pointing at the figure)."""
+        bottom edge sits on self._bubble_bottom (it grows upward, tail pointing at the figure)."""
         c = self.canvas
         c.delete("bubble")
         L, R = BUBBLE_L, BUBBLE_R
@@ -431,7 +518,7 @@ class BabyAIDesktopWindow:
 
         has_echo = self._input_open or bool(self._echo)
         pad = 12
-        height = pad * 2 + (len(lines) + (1 if has_echo else 0)) * lh
+        height = pad * 2 + (len(lines) + (1 if has_echo else 0) + (1 if self._confirm else 0)) * lh
         c.create_polygon(
             _plate(L, 0, R, height, 10, WIDTH // 2, TAIL),
             fill=BUBBLE_FILL, outline=CYAN, width=2, joinstyle="miter", tags="bubble",
@@ -475,7 +562,13 @@ class BabyAIDesktopWindow:
                     break
                 remaining -= len(line) + 1
 
-        c.move("bubble", 0, BUBBLE_BOTTOM - height)
+        if self._confirm:  # answer row: clickable, or press Y / N
+            ay = height - pad - lh
+            yes = c.create_text(x0, ay, anchor="nw", text="[Y] allow", font=self.font_label, fill=CYAN, tags=("bubble", "confirm", "confirm_yes"))
+            nx = c.bbox(yes)[2] + cw * 3
+            c.create_text(nx, ay, anchor="nw", text="[N] decline", font=self.font_label, fill=RED, tags=("bubble", "confirm", "confirm_no"))
+
+        c.move("bubble", 0, self._bubble_bottom - height)
 
     def _block(self, x: float, y: float) -> None:
         self.canvas.create_rectangle(
@@ -485,17 +578,26 @@ class BabyAIDesktopWindow:
     def _tick(self) -> None:
         self._tick_n += 1
         dirty = False
+        now = time.monotonic()
         if not self._thinking and self._shown < self._target:
-            self._shown = min(self._target, self._shown + TYPE_SPEED)
+            self._shown = max(self._shown, letters_revealed(now - self._reveal_start, self._target))
             dirty = True
+        if self._pet_due is not None and now >= self._pet_due:
+            self._pet_due = None
+            if not (self._busy or self._input_open or self._thinking or self._confirm):
+                self._echo = "pets you"
+                self._set_reply(pet_line(self._pet_count))
+                self._pet_count += 1
+                dirty = False  # _set_reply already redrew the bubble
         if self._thinking and self._think_since is not None:
-            text = thinking_label(time.monotonic() - self._think_since, self._timings.think_after_s)
+            text = thinking_label(now - self._think_since, self._timings.think_after_s)
             if text != self._think_text:
                 self._think_text = text
                 dirty = True
         if self._tick_n % BLINK_TICKS == 0 and (self._input_open or self._thinking):
             dirty = True
         self._presence_tick()
+        self._update_body(now)
         if dirty:
             self._render_bubble()
         self._tick_id = self.root.after(TICK_MS, self._tick)
@@ -522,6 +624,12 @@ class BabyAIDesktopWindow:
 
     def _on_key(self, event) -> str | None:
         self._wake()
+        if self._confirm is not None:
+            if event.keysym in ("y", "Y", "Return", "KP_Enter"):
+                self._answer_confirm(True)
+            elif event.keysym in ("n", "N", "Escape"):
+                self._answer_confirm(False)
+            return "break"
         if not self._input_open:
             return None
         if event.keysym in ("Return", "KP_Enter"):
@@ -576,13 +684,13 @@ class BabyAIDesktopWindow:
                 self._wake()
         except queue.Empty:
             pass
-        try:
-            while True:
-                self._set_reply(self._notices.get_nowait())
-                self._capri_busy = False
-                self._wake()
-        except queue.Empty:
-            pass
+        if self._confirm is None:
+            try:
+                self._begin_confirm(self._confirm_requests.get_nowait())
+            except queue.Empty:
+                pass
+        elif time.monotonic() > self._confirm["deadline"]:
+            self._answer_confirm(False)  # nobody answered: that is a no
         self._poll_id = self.root.after(100, self._poll_results)
 
     def _on_mic(self) -> None:
@@ -601,30 +709,46 @@ class BabyAIDesktopWindow:
         else:
             self._set_reply(heard or "Voice input isn't available.")
 
-    def _on_capri(self) -> None:
-        if self._capri_busy:
+    # ------------------------------------------------------------ confirmation
+
+    def _confirm_from_worker(self, name: str, arguments: dict, verdict: dict) -> bool:
+        """Called on the worker thread by the safety gate; blocks until the user answers in the bubble."""
+        shown = ", ".join(f"{key}={str(value)[:48]!r}" for key, value in arguments.items())
+        request = {
+            "text": f"Can I run {name}? {shown} ({getattr(verdict.get('risk_level'), 'value', verdict.get('risk_level', '?'))} risk)".replace("  ", " "),
+            "event": threading.Event(),
+            "answer": False,
+            "deadline": 0.0,
+        }
+        self._confirm_requests.put(request)
+        request["event"].wait(CONFIRM_TIMEOUT_S + 10)  # the Tk side times out first; this only covers a closed window
+        return bool(request["answer"])
+
+    def _begin_confirm(self, request: dict) -> None:
+        request["deadline"] = time.monotonic() + CONFIRM_TIMEOUT_S
+        self._confirm = request
+        self._wake()
+        self._set_reply(request["text"])
+        self.canvas.focus_force()
+
+    def _answer_confirm(self, yes: bool) -> None:
+        request, self._confirm = self._confirm, None
+        if request is None:
             return
-        self._capri_busy = True
-        self._set_reply(LAUNCHING)
-        threading.Thread(target=self._launch_capri, daemon=True).start()
-
-    def _launch_capri(self) -> None:
-        # launch_capri() waits ~1.5 s to see whether Capri stays up, so it runs off
-        # the Tk thread; the outcome comes back through a queue like assistant replies.
-        try:
-            from babyai.capri_launcher import launch_capri
-
-            message = launch_capri().message
-        except Exception as exc:
-            message = f"Could not launch Capri: {exc}"
-        self._notices.put(message)
+        request["answer"] = yes
+        request["event"].set()
+        self._set_reply("", thinking=True)  # she carries on with the job
 
     # ------------------------------------------------------------ drag / close
 
     def _bind_events(self) -> None:
         c = self.canvas
         c.bind("<ButtonPress-1>", self._start_drag)
+        c.bind("<ButtonRelease-1>", self._end_press)
         c.bind("<B1-Motion>", self._move_window)
+        c.bind("<Motion>", self._on_motion)
+        c.tag_bind("confirm_yes", "<Button-1>", lambda _event: self._answer_confirm(True))
+        c.tag_bind("confirm_no", "<Button-1>", lambda _event: self._answer_confirm(False))
         c.bind("<Key>", self._on_key)
 
         self.menu = tk.Menu(self.root, tearoff=0)
@@ -638,13 +762,28 @@ class BabyAIDesktopWindow:
 
     def _start_drag(self, event) -> None:
         self._wake()
+        self._pressed = True
         current = self.canvas.find_withtag("current")
-        if current and "btn" in self.canvas.gettags(current[0]):
+        if current and {"btn", "confirm"} & set(self.canvas.gettags(current[0])):
             self._drag = None  # a button press, not a window drag
             return
         if self._input_open:
             self.canvas.focus_force()
         self._drag = (event.x_root - self.root.winfo_x(), event.y_root - self.root.winfo_y())
+
+    def _end_press(self, _event) -> None:
+        self._pressed = False
+        self._pet.reset()
+
+    def _on_motion(self, event) -> None:
+        """Stroking the pointer back and forth across her pets her."""
+        if self._animator is None:
+            return
+        now = time.monotonic()
+        blocked = self._pressed or self._busy or self._input_open or self._clock.asleep or self._confirm is not None
+        if self._pet.feed(event.x, now, self._body_hit(event.x, event.y), blocked):
+            self._animator.pet(now)
+            self._pet_due = now + PET_DELAY_S
 
     def _move_window(self, event) -> None:
         if self._drag is None:
@@ -666,6 +805,9 @@ class BabyAIDesktopWindow:
             self.menu.grab_release()
 
     def close(self, _event=None) -> None:
+        pending, self._confirm = self._confirm, None
+        if pending is not None:  # unblock a tool call that is waiting on an answer (the answer is "no")
+            pending["event"].set()
         for after_id in (self._poll_id, self._tick_id):
             if after_id is not None:
                 try:

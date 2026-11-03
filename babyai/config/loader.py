@@ -31,8 +31,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "safety": {
         "level": "strict",
     },
-    # Desktop overlay timings (used by `python3 -m babyai --desktop`); 0 turns auto-sleep off.
+    # Desktop overlay (used by `python3 -m babyai --desktop`); 0 turns auto-sleep off.
+    # character: "capri" = Capri's sprites + persona, "stick" = the plain stick figure.
+    # sprite_scale: Tk can only scale by simple fractions - "1/2", "2/3", "3/4" or "1".
     "ui": {
+        "character": "capri",
+        "sprite_scale": "1/2",
         "think_after_s": 15,
         "sleep_after_s": 600,
         "wake_radius_px": 150,
