@@ -1,4 +1,5 @@
 import argparse
+import sys
 
 from babyai.agent.core import BabyAI
 
@@ -43,6 +44,8 @@ def main(argv=None):
         return 0
 
     if args.command:
+        if sys.stdin.isatty():  # someone is there to answer a "may I run this?" question
+            assistant.confirm = assistant.cli_confirm
         response = assistant.process_user_input(args.command)
         print(response)
         return 0

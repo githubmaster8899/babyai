@@ -21,6 +21,7 @@ from fractions import Fraction
 from pathlib import Path
 
 from babyai.ui.capri_body import CLIPS
+from babyai.ui.silhouette import Rect, alpha_rows, solid_rects
 
 SPRITE_DIR = Path(__file__).resolve().parent.parent.parent / "capri" / "assets" / "sprites"
 REQUIRED = ("idle", "blink", "mouth")  # without these there is no figure worth drawing
@@ -50,6 +51,8 @@ class SpriteBank:
         self._cache_dir = Path(cache) if cache is not None else cache_root()
         self._strips: dict[str, tk.PhotoImage | None] = {}
         self._cells: dict[tuple[str, int], tk.PhotoImage] = {}
+        self._alpha: dict[str, list[bytes] | None] = {}
+        self._outlines: dict[tuple[str, int], list[Rect] | None] = {}
 
     # ------------------------------------------------------------------ loading
 
@@ -126,6 +129,29 @@ class SpriteBank:
             self.root.tk.call(image, "copy", strip, "-from", index * width, 0, (index + 1) * width, strip.height())
             self._cells[key] = image
         return self._cells[key]
+
+    def silhouette(self, name: str, index: int) -> list[Rect] | None:
+        """Rectangles covering the solid pixels of one frame, or None if they can't be worked out
+        (the cache file is missing or not in the layout Tk writes). Used to clip the window to her outline."""
+        key = (name, index)
+        if key not in self._outlines:
+            rows = self._alpha_rows(name)
+            strip = self.strip(name)
+            if rows is None or strip is None:
+                self._outlines[key] = None
+            else:
+                width = strip.width() // CLIPS[name].cells
+                self._outlines[key] = solid_rects(rows, index * width, width)
+        return self._outlines[key]
+
+    def _alpha_rows(self, name: str) -> list[bytes] | None:
+        if name not in self._alpha:
+            path = self._cache_path(name)
+            try:
+                self._alpha[name] = alpha_rows(path.read_bytes()) if path is not None and path.is_file() else None
+            except OSError:
+                self._alpha[name] = None
+        return self._alpha[name]
 
     def is_opaque(self, name: str, index: int, x: int, y: int) -> bool:
         """Is the pixel at (x, y) of this frame part of her (not see-through)?"""

@@ -41,6 +41,7 @@ from babyai.ui.behavior import SleepClock, eye_offset, thinking_label, timings_f
 from babyai.ui.capri_body import CLIPS, Animator, PetDetector, letters_revealed, mouth_cell, pet_line
 from babyai.ui.persona import apply_character
 from babyai.ui.sprites import DEFAULT_SCALE, SpriteBank
+from babyai.ui.xshape import XShape
 
 if TYPE_CHECKING:  # the UI only relies on the assistant's public methods at runtime
     from babyai.agent.core import BabyAI
@@ -97,10 +98,35 @@ def _lerp(a: float, b: float, t: float) -> float:
     return a + (b - a) * t
 
 
+def _tail_span(x1: float, x2: float, cut: float, tip_x: float, tail: float) -> tuple[float, float]:
+    """Where the pointer tail meets the bubble's bottom edge."""
+    return max(x1 + cut + 6, tip_x - tail * 0.8), min(x2 - 6, tip_x + tail * 0.2)
+
+
+def _bubble_rects(left: int, top: int, right: int, bottom: int, cut: int = 10) -> list[tuple[int, int, int, int]]:
+    """Rectangles matching the bubble outline (cut left corners, 2 px outline), without its tail."""
+    rects = [(left - 1, top + cut, right - left + 2, bottom - top - 2 * cut + 1)]
+    for i in range(cut + 1):  # the diagonal corners, a row at a time
+        x = left + cut - i - 1
+        rects.append((x, top + i - 1, right + 1 - x, 1))
+        rects.append((x, bottom - i + 1, right + 1 - x, 1))
+    return rects
+
+
+def _pill_rects(x1: int, y1: int, x2: int, y2: int, radius: int = 18) -> list[tuple[int, int, int, int]]:
+    """Rectangles matching a pill with rounded ends."""
+    radius = min(radius, (y2 - y1) // 2)
+    rects = [(x1, y1 + radius, x2 - x1, y2 - y1 - 2 * radius)]
+    for i in range(radius):
+        inset = round(radius - math.sqrt(max(0.0, radius * radius - (radius - i - 0.5) ** 2)))
+        rects.append((x1 + inset, y1 + i, x2 - x1 - 2 * inset, 1))
+        rects.append((x1 + inset, y2 - 1 - i, x2 - x1 - 2 * inset, 1))
+    return rects
+
+
 def _plate(x1: float, y1: float, x2: float, y2: float, cut: float, tip_x: float, tail: float) -> list[float]:
     """Bubble outline: left corners cut, pointer tail on the bottom edge toward tip_x."""
-    near = max(x1 + cut + 6, tip_x - tail * 0.8)
-    far = min(x2 - 6, tip_x + tail * 0.2)
+    near, far = _tail_span(x1, x2, cut, tip_x, tail)
     return [
         x1 + cut, y1, x2, y1, x2, y2, far, y2, tip_x, y2 + tail, near, y2,
         x1 + cut, y2, x1, y2 - cut, x1, y1 + cut,
@@ -188,6 +214,10 @@ class BabyAIDesktopWindow:
         self._pet_count = 0
         self._pet_due: float | None = None
         self._bubble_bottom = BUBBLE_BOTTOM
+        self._bubble_box: tuple[int, int, int, int] | None = None  # left, top, right, bottom of the bubble (not the tail)
+        self._body_y = SPRITE_BOTTOM  # where her frame sits right now (it breathes)
+        self._shape: XShape | None = None  # clips the window to her outline on X11
+        self._shape_key: tuple | None = None
 
         self._make_fonts()
         self._load_character()
@@ -202,7 +232,8 @@ class BabyAIDesktopWindow:
 
         if not self.transparent:
             self.root.update()  # map the window first
-            self._apply_panel_alpha()
+            if not self._enable_shape():
+                self._apply_panel_alpha()
 
     # ------------------------------------------------------------------ window
 
@@ -246,6 +277,67 @@ class BabyAIDesktopWindow:
             self.root.attributes("-alpha", PANEL_ALPHA)
         except tk.TclError:
             pass
+
+    def _enable_shape(self) -> bool:
+        """On X11 (and XWayland) clip the window to her outline, bubble and pill, so she floats on
+        the desktop instead of sitting on a panel. Quietly does nothing - and the panel stays - if
+        any part of that is unavailable."""
+        if self._windowing != "x11" or self._sprites is None or self._body_drawn is None:
+            return False
+        if self._sprites.silhouette(*self._body_drawn[:2]) is None:
+            return False
+        try:
+            ids = {self.root.winfo_id(), int(self.root.wm_frame(), 16)}
+        except (tk.TclError, ValueError):
+            ids = {self.root.winfo_id()}
+        shape = XShape.create(ids)
+        if shape is None:
+            return False
+        self._shape = shape
+        self._update_shape()
+        return True
+
+    def _update_shape(self) -> None:
+        shape = self._shape
+        if shape is None or self._body_drawn is None or self._sprites is None or self._bubble_box is None:
+            return
+        left, top, right, bottom = self._bubble_box
+        pill = self.canvas.bbox("pill")
+        key = (self._body_drawn[:2], self._body_y, self._bubble_box, pill)
+        if key == self._shape_key:
+            return
+        outline = self._sprites.silhouette(*self._body_drawn[:2])
+        if outline is None:
+            self._drop_shape()
+            return
+        width, height = self._sprites.cell_size
+        ox, oy = (WIDTH - width) // 2, self._body_y - height
+        rects = [(max(0, ox + x), max(0, oy + y), w, h) for x, y, w, h in outline]
+        rects += _bubble_rects(left, top, right, bottom)  # the bubble itself ...
+        near, far = _tail_span(BUBBLE_L, BUBBLE_R, 10, WIDTH // 2, TAIL)
+        for step in range(TAIL):  # ... and its tail, row by row
+            x1 = near + (WIDTH // 2 - near) * step / TAIL
+            x2 = far - (far - WIDTH // 2) * step / TAIL
+            rects.append((int(x1) - 1, bottom + step + 1, int(x2 - x1) + 3, 1))
+        if pill:
+            rects += _pill_rects(*pill)
+        try:
+            shape.set_rects([(max(0, x), max(0, y), min(w, WIDTH - max(0, x)), h) for x, y, w, h in rects])
+        except Exception:
+            self._drop_shape()
+            return
+        self._shape_key = key
+
+    def _drop_shape(self) -> None:
+        """Give up on the silhouette: show the whole window again, translucent like before."""
+        shape, self._shape = self._shape, None
+        if shape is not None:
+            try:
+                shape.set_rects([(0, 0, WIDTH, HEIGHT)])
+                shape.close()
+            except Exception:
+                pass
+        self._apply_panel_alpha()
 
     def _place_window(self) -> None:
         screen_w = self.root.winfo_screenwidth()
@@ -336,6 +428,7 @@ class BabyAIDesktopWindow:
             jaw = bank.cell("mouth", frame.mouth) if frame.mouth >= 0 else None
             c.itemconfigure(self._mouth_item, image=jaw if jaw is not None else "")
         y = SPRITE_BOTTOM + round(frame.breathe * bank.zoom / bank.sub)
+        self._body_y = y
         c.coords(self._body_item, WIDTH // 2, y)
         c.coords(self._mouth_item, WIDTH // 2, y)
 
@@ -569,6 +662,7 @@ class BabyAIDesktopWindow:
             c.create_text(nx, ay, anchor="nw", text="[N] decline", font=self.font_label, fill=RED, tags=("bubble", "confirm", "confirm_no"))
 
         c.move("bubble", 0, self._bubble_bottom - height)
+        self._bubble_box = (L, self._bubble_bottom - height, R, self._bubble_bottom)
 
     def _block(self, x: float, y: float) -> None:
         self.canvas.create_rectangle(
@@ -600,11 +694,14 @@ class BabyAIDesktopWindow:
         self._update_body(now)
         if dirty:
             self._render_bubble()
+        self._update_shape()
         self._tick_id = self.root.after(TICK_MS, self._tick)
 
     # ------------------------------------------------------------- interaction
 
     def _toggle_input(self) -> None:
+        if self._confirm is not None:  # answer her question first
+            return
         if self._input_open:
             self._close_input()
         else:
@@ -694,7 +791,7 @@ class BabyAIDesktopWindow:
         self._poll_id = self.root.after(100, self._poll_results)
 
     def _on_mic(self) -> None:
-        if self._busy:
+        if self._busy or self._confirm is not None:
             return
         try:
             from babyai.voice.stt import SpeechToText
@@ -805,6 +902,9 @@ class BabyAIDesktopWindow:
             self.menu.grab_release()
 
     def close(self, _event=None) -> None:
+        if self._shape is not None:
+            self._shape.close()
+            self._shape = None
         pending, self._confirm = self._confirm, None
         if pending is not None:  # unblock a tool call that is waiting on an answer (the answer is "no")
             pending["event"].set()

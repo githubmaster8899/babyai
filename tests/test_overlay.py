@@ -240,6 +240,73 @@ class OverlayTests(unittest.TestCase):
         self.assertFalse(win._clock.asleep)
         self.assertEqual(win._animator.clip, "arrive")
 
+    def test_pencil_and_mic_do_nothing_while_a_question_is_open(self):
+        win = self.window()
+        win._confirm = {"text": "Can I?", "event": threading.Event(), "answer": False, "deadline": time.monotonic() + 30}
+        win._toggle_input()
+        win._on_mic()
+        self.assertFalse(win._input_open)
+        win._confirm = None
+
+    def test_on_x11_the_window_is_clipped_to_her_outline(self):
+        win = self.window()
+        if win._windowing != "x11":
+            self.skipTest("the silhouette is X11-only")
+        self.assertIsNotNone(win._shape, "the shape should have been enabled")
+        self.pump(win, 0.3)
+        rects = win._shape.get_rects()
+        self.assertTrue(rects)
+        from babyai.ui.app import BTN_Y, HEIGHT, SPRITE_BOTTOM, WIDTH
+
+        def shown(x, y):
+            return any(rx <= x < rx + rw and ry <= y < ry + rh for rx, ry, rw, rh in rects)
+
+        self.assertFalse(shown(5, 5), "the empty corner must not be drawn")
+        self.assertFalse(shown(WIDTH - 5, HEIGHT // 2))
+        self.assertTrue(shown(WIDTH // 2, SPRITE_BOTTOM - CELL_H // 2), "her body must be")
+        self.assertFalse(shown(WIDTH // 2 - CELL_W, SPRITE_BOTTOM - CELL_H // 2), "but not the see-through side of her frame")
+        self.assertTrue(shown(WIDTH // 2, BTN_Y), "the pill must be")
+        left, top, right, bottom = win._bubble_box
+        self.assertTrue(shown(left + 5, top + 5) and shown(right - 5, bottom - 5), "the bubble must be")
+        self.assertFalse(shown(left + 20, bottom + 8), "the strip beside the bubble's tail is not part of it")
+        self.assertTrue(shown(WIDTH // 2, bottom + 3), "the tail is")
+
+    def test_bubble_and_pill_shapes_follow_their_corners(self):
+        from babyai.ui.app import _bubble_rects, _pill_rects
+
+        def covers(rects, x, y):
+            return any(rx <= x < rx + rw and ry <= y < ry + rh for rx, ry, rw, rh in rects)
+
+        bubble = _bubble_rects(60, 100, 500, 200)
+        self.assertTrue(covers(bubble, 300, 150) and covers(bubble, 499, 101) and covers(bubble, 61, 150))
+        self.assertFalse(covers(bubble, 60, 100), "the cut top-left corner is not part of the bubble")
+        self.assertFalse(covers(bubble, 60, 200), "nor the bottom-left one")
+        self.assertTrue(covers(bubble, 71, 101), "but the edge past the cut is")
+        pill = _pill_rects(200, 580, 300, 620)
+        self.assertTrue(covers(pill, 250, 600) and covers(pill, 205, 600) and covers(pill, 250, 580))
+        self.assertFalse(covers(pill, 200, 580), "the rounded pill corner is not part of it")
+        self.assertFalse(covers(pill, 299, 619))
+
+    def test_the_shape_follows_the_bubble_as_it_grows(self):
+        win = self.window()
+        if win._shape is None:
+            self.skipTest("no X11 shape here")
+        self.pump(win, 0.3)
+        before = win._bubble_box
+        win._set_reply("word " * 60)  # a long reply: a taller bubble
+        self.pump(win, 0.3)
+        self.assertLess(win._bubble_box[1], before[1])
+        top = min(ry for rx, ry, rw, rh in win._shape.get_rects() if rw > 100)
+        self.assertLessEqual(top, win._bubble_box[1])
+
+    def test_without_a_silhouette_the_panel_comes_back(self):
+        win = self.window()
+        if win._shape is None:
+            self.skipTest("no X11 shape here")
+        win._drop_shape()
+        self.assertIsNone(win._shape)
+        self.pump(win, 0.2)  # keeps running
+
     def test_launch_chip_is_gone(self):
         win = self.window()
         self.assertFalse(win.canvas.find_withtag("btn_capri"))
