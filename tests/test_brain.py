@@ -208,6 +208,25 @@ class OfflineAndMemoryTests(unittest.TestCase):
         self.assertEqual(self.ai.process_user_input("what do I like?"), "You love pineapple pizza.")
         self.assertIn("pineapple", self.ai.llm_client.calls[1]["messages"][-1]["content"])  # the model was shown the memory
 
+    def test_memory_tools_work_when_the_overlay_asks_from_a_worker_thread(self):
+        import threading
+
+        replies = []
+
+        def turn():
+            self.ai.llm_client = ScriptedLLM(call_tool("remember_fact", {"fact": "The user has a cat called Miso."}), say("Noted."))
+            replies.append(self.ai.process_user_input("remember my cat is Miso"))
+            self.ai.llm_client = ScriptedLLM(call_tool("recall_memory", {"query": "what's my cat's name?"}), say("Miso."))
+            replies.append(self.ai.process_user_input("what's my cat's name?"))
+
+        worker = threading.Thread(target=turn)
+        worker.start()
+        worker.join()
+        self.assertEqual(replies, ["Noted.", "Miso."])
+        shown_to_the_model = self.ai.llm_client.calls[1]["messages"][-1]["content"]
+        self.assertIn("Miso", shown_to_the_model)  # the tool worked rather than reporting an error
+        self.assertNotIn("failed", shown_to_the_model)
+
     def test_forgetting_asks_first(self):
         self.ai.memory.remember_fact("The user loves pineapple pizza.", "user")
         self.ai.llm_client = ScriptedLLM(call_tool("forget_memory", {"query": "pineapple"}), say("ok"))

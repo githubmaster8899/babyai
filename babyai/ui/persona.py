@@ -43,10 +43,7 @@ CAPRI_PROMPT = (
 )
 
 
-CAPRI_OFFLINE = (
-    "I can't reach my brain at {url} ({reason}). Start a model server, like Ollama, or point "
-    "[llm] base_url in config.toml at one, then ask me again."
-)
+CAPRI_OFFLINE = "I couldn't get an answer from my brain at {url}: {reason}. {hint}"
 
 
 def character_of(config: dict[str, Any] | None) -> str:

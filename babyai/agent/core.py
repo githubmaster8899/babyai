@@ -38,9 +38,11 @@ class BabyAI:
         llm_cfg = self.config.get("llm", {})
         self.llm_client = LLMClient(
             base_url=llm_cfg.get("base_url", "http://localhost:11434/v1"),
-            model=llm_cfg.get("model", "llama-3.1-8b"),
+            model=llm_cfg.get("model", "llama3.1:8b"),
             api_key=llm_cfg.get("api_key", ""),
+            timeout=llm_cfg.get("timeout", 120),
         )
+        self._tools_ok = True  # flips off if the model says it can't use tools
 
     def cli_confirm(self, name: str, arguments: dict[str, Any], verdict: dict[str, Any]) -> bool:
         shown = ", ".join(f"{key}={str(value)[:80]!r}" for key, value in arguments.items()) or "no arguments"
@@ -70,15 +72,16 @@ class BabyAI:
     def process_user_input(self, user_input: str) -> str:
         self.context.add_user_message(user_input)
         messages = self.context.build_messages()
-        tool_schemas = self.tool_registry.get_openai_tools()
+        tool_schemas = self.tool_registry.get_openai_tools() if self._tools_ok else None
 
         try:
-            result = self.llm_client.complete(messages=messages, tools=tool_schemas, stream=False)
+            result = self._complete(messages, tool_schemas)
         except Exception as exc:
             if self.offline_reply:
                 self.context.history.pop()  # as far as the model is concerned this turn never happened
-                reason = str(exc).replace("LLM request failed:", "").replace("urlopen error", "").strip(" <>")[:100]
-                return self.offline_reply.format(url=getattr(self.llm_client, "base_url", "the model server"), reason=reason or "no reason given")
+                reason, hint = self._explain_failure(exc)
+                url = getattr(self.llm_client, "base_url", "the model server")
+                return self.offline_reply.format(url=url, reason=reason, hint=hint)
             fallback = self._fallback_response(user_input)
             self.context.add_assistant_message(fallback)
             return fallback
@@ -100,6 +103,39 @@ class BabyAI:
         content = message.get("content") or "I’m here and ready to help."
         self.context.add_assistant_message(content)
         return content
+
+    def _complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None) -> dict[str, Any]:
+        try:
+            return self.llm_client.complete(messages=messages, tools=tools, stream=False)
+        except Exception as exc:
+            if tools and "support tools" in str(exc).lower():
+                # Ollama refuses tool definitions for models that can't use them. Carry on as a plain chat.
+                self._tools_ok = False
+                return self.llm_client.complete(messages=messages, tools=None, stream=False)
+            raise
+
+    def _explain_failure(self, exc: Exception) -> tuple[str, str]:
+        """(what went wrong, what to do about it) for a model request that failed, in plain words."""
+        status = getattr(exc, "status", None)
+        detail = str(getattr(exc, "detail", "") or "")
+        model = getattr(self.llm_client, "model", "the model")
+        text = str(exc).lower()
+        if status == 404:
+            lister = getattr(self.llm_client, "list_models", None)
+            have = lister() if callable(lister) else []
+            if have:
+                return (f"there's no model called {model!r} there; it has {', '.join(have[:8])}",
+                        "Set [llm] model in config.toml to one of those, then ask me again.")
+            return (f"there's no model called {model!r} there",
+                    f"Pull one (for Ollama: ollama pull {model}) or set [llm] model in config.toml, then ask me again.")
+        if status in (401, 403):
+            return "the server refused my key", "Check [llm] api_key in config.toml."
+        if status:
+            return f"the server answered {status}" + (f" ({detail})" if detail else ""), "Check [llm] model and base_url in config.toml."
+        if "timed out" in text:
+            return "it took too long to answer", "The model may still be loading: try again in a moment, or raise [llm] timeout in config.toml."
+        reason = str(exc).replace("LLM request failed:", "").replace("urlopen error", "").strip(" <>")[:100]
+        return reason or "no reason given", "Start a model server, like Ollama, or point [llm] base_url in config.toml at one, then ask me again."
 
     @staticmethod
     def _parse_call(call: dict[str, Any]) -> tuple[str, dict[str, Any]]:

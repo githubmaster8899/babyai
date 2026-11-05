@@ -11,8 +11,9 @@ except ModuleNotFoundError:  # pragma: no cover
 DEFAULT_CONFIG: dict[str, Any] = {
     "llm": {
         "base_url": "http://localhost:11434/v1",
-        "model": "llama-3.1-8b",
+        "model": "llama3.1:8b",  # an Ollama tag that supports tools; run `ollama list` to see what you have
         "api_key": "",
+        "timeout": 120,  # seconds; the first request can be slow while Ollama loads the model
     },
     "agent": {
         "name": "BabyAI",
