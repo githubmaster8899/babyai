@@ -31,6 +31,9 @@ class BabyAI:
         # Set by the front end (CLI prompt, desktop bubble). Without one, anything the
         # safety gate wants confirmed is declined rather than silently run.
         self.confirm: ConfirmHook | None = None
+        # What to say when the model can't be reached, with {url} and {reason} filled in. Unset keeps the
+        # plain canned text-mode replies; the desktop character sets it so she says what is wrong.
+        self.offline_reply: str | None = None
 
         llm_cfg = self.config.get("llm", {})
         self.llm_client = LLMClient(
@@ -71,7 +74,11 @@ class BabyAI:
 
         try:
             result = self.llm_client.complete(messages=messages, tools=tool_schemas, stream=False)
-        except Exception:
+        except Exception as exc:
+            if self.offline_reply:
+                self.context.history.pop()  # as far as the model is concerned this turn never happened
+                reason = str(exc).replace("LLM request failed:", "").replace("urlopen error", "").strip(" <>")[:100]
+                return self.offline_reply.format(url=getattr(self.llm_client, "base_url", "the model server"), reason=reason or "no reason given")
             fallback = self._fallback_response(user_input)
             self.context.add_assistant_message(fallback)
             return fallback

@@ -10,7 +10,7 @@ def main(argv=None):
     parser.add_argument("--voice", action="store_true", help="Enable voice mode if available")
     parser.add_argument("--no-voice", action="store_true", help="Disable voice mode")
     parser.add_argument("--desktop", action="store_true", help="Launch the floating desktop overlay (needs Tk)")
-    parser.add_argument("--capri", action="store_true", help="Launch the built Capri companion app from capri/ and exit; if it can't start, carry on as usual")
+    parser.add_argument("--capri", action="store_true", help="Optional: launch the separate C# Capri app built from capri/ and exit (not needed for --desktop, which has Capri built in); if it can't start, carry on as usual")
     parser.add_argument("command", nargs="?", help="Run a single text command instead of interactive mode")
     args = parser.parse_args(argv)
 

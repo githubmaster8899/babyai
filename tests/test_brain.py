@@ -10,6 +10,8 @@ from babyai.tools.registry import build_default_registry
 class ScriptedLLM:
     """Stands in for LLMClient: returns queued responses and records what it was sent."""
 
+    base_url = "http://localhost:11434/v1"
+
     def __init__(self, *responses):
         self.responses = list(responses)
         self.calls = []
@@ -150,6 +152,71 @@ class BrainTests(unittest.TestCase):
         self.ai.process_user_input("go")
         tool_messages = [m for m in self.ai.llm_client.calls[1]["messages"] if m["role"] == "tool"]
         self.assertEqual(len(tool_messages), 4)
+
+
+class OfflineAndMemoryTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        config = os.path.join(self.dir.name, "config.toml")
+        with open(config, "w") as handle:
+            handle.write(f'[memory]\ndb_path = "{self.dir.name}/mem.db"\n')
+        self.ai = BabyAI(config_path=config)
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def test_plain_cli_keeps_its_canned_text_mode_reply(self):
+        self.ai.llm_client = ScriptedLLM(RuntimeError("LLM request failed: <urlopen error [Errno 111] Connection refused>"))
+        self.assertIn("BabyAI", self.ai.process_user_input("hello"))
+
+    def test_the_character_says_what_is_wrong_when_the_model_is_unreachable(self):
+        from babyai.ui.persona import apply_character
+
+        apply_character(self.ai)
+        self.ai.llm_client = ScriptedLLM(
+            RuntimeError("LLM request failed: <urlopen error [Errno 111] Connection refused>"), say("back online"),
+        )
+        reply = self.ai.process_user_input("hello")
+        self.assertIn("localhost:11434", reply)
+        self.assertIn("Connection refused", reply)
+        self.assertNotIn("urlopen", reply)
+        self.assertNotIn("BabyAI", reply)
+        self.assertEqual(self.ai.context.history, [])  # the failed turn is not remembered
+        self.assertEqual(self.ai.process_user_input("hello again"), "back online")
+        self.assertEqual([m["role"] for m in self.ai.context.history], ["user", "assistant"])
+
+    def test_a_reply_template_someone_set_is_not_overwritten(self):
+        from babyai.ui.persona import apply_character
+
+        self.ai.offline_reply = "custom {url}"
+        apply_character(self.ai)
+        self.assertEqual(self.ai.offline_reply, "custom {url}")
+
+    def test_the_stick_figure_keeps_the_plain_replies(self):
+        from babyai.ui.persona import apply_character
+
+        self.ai.config["ui"]["character"] = "stick"
+        apply_character(self.ai)
+        self.assertIsNone(self.ai.offline_reply)
+
+    def test_memory_tools_work_through_the_brain(self):
+        self.ai.llm_client = ScriptedLLM(call_tool("remember_fact", {"fact": "The user loves pineapple pizza."}), say("Noted."))
+        self.assertEqual(self.ai.process_user_input("remember I love pineapple pizza"), "Noted.")  # LOW risk: no prompt
+        self.assertTrue(self.ai.memory.search_memory("pineapple"))
+
+        self.ai.llm_client = ScriptedLLM(call_tool("recall_memory", {"query": "pineapple"}), say("You love pineapple pizza."))
+        self.assertEqual(self.ai.process_user_input("what do I like?"), "You love pineapple pizza.")
+        self.assertIn("pineapple", self.ai.llm_client.calls[1]["messages"][-1]["content"])  # the model was shown the memory
+
+    def test_forgetting_asks_first(self):
+        self.ai.memory.remember_fact("The user loves pineapple pizza.", "user")
+        self.ai.llm_client = ScriptedLLM(call_tool("forget_memory", {"query": "pineapple"}), say("ok"))
+        self.ai.process_user_input("forget the pizza thing")  # no confirm hook -> declined
+        self.assertTrue(self.ai.memory.search_memory("pineapple"))
+        self.ai.confirm = lambda *_: True
+        self.ai.llm_client = ScriptedLLM(call_tool("forget_memory", {"query": "pineapple"}), say("gone"))
+        self.ai.process_user_input("yes forget it")
+        self.assertFalse(self.ai.memory.search_memory("pineapple"))
 
 
 if __name__ == "__main__":

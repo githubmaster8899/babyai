@@ -43,6 +43,12 @@ CAPRI_PROMPT = (
 )
 
 
+CAPRI_OFFLINE = (
+    "I can't reach my brain at {url} ({reason}). Start a model server, like Ollama, or point "
+    "[llm] base_url in config.toml at one, then ask me again."
+)
+
+
 def character_of(config: dict[str, Any] | None) -> str:
     return str((config or {}).get("ui", {}).get("character", "capri")).strip().lower()
 
@@ -59,6 +65,8 @@ def apply_character(assistant: Any) -> str:
         return name
     if name == defaults["name"]:
         name = CAPRI_NAME
+    if getattr(assistant, "offline_reply", None) is None:
+        assistant.offline_reply = CAPRI_OFFLINE
     context = getattr(assistant, "context", None)
     if context is not None and agent.get("system_prompt", defaults["system_prompt"]) == defaults["system_prompt"]:
         context.system_prompt = CAPRI_PROMPT
