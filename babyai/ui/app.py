@@ -85,10 +85,12 @@ MAX_LINES = 8
 MAX_CHARS = 420
 MAX_DRAFT = 500
 
-TICK_MS = 40
-BLINK_TICKS = 12  # cursor blink period / 2
-POINTER_TICKS = 5  # sample the mouse pointer every 5th tick (~200 ms)
-Z_TICKS = 12  # the sleeping "z z z" gains one letter every 12 ticks (~0.5 s)
+# Capri's clips run at 8 and 15 fps and she types 28 letters a second, so a coarse tick makes her uneven (at 40 ms a
+# 15 fps frame was held 44 ms, then 88 ms, then 44 ...). About 60 ticks a second keeps every frame within a few ms of on time.
+TICK_MS = 16
+BLINK_TICKS = round(480 / TICK_MS)  # cursor blink period / 2 (~0.5 s)
+POINTER_TICKS = round(200 / TICK_MS)  # sample the mouse pointer about every 200 ms
+Z_TICKS = round(480 / TICK_MS)  # the sleeping "z z z" gains one letter every ~0.5 s
 Z_CYCLE = (1, 2, 3, 3, 3)  # letters shown over one cycle; it rests on the full "z z z"
 
 BTN_Y = 602
@@ -194,6 +196,7 @@ class BabyAIDesktopWindow:
         self._think_text: str | None = None  # "THINKING… N s" once the wait gets long
         self._input_open = False
         self._tick_n = 0
+        self._tick_due = time.monotonic()  # when the next tick should run (see _tick_delay)
         self._busy = False
         self._results: queue.Queue[str] = queue.Queue()
         self._confirm_requests: queue.Queue[dict] = queue.Queue()
@@ -297,8 +300,15 @@ class BabyAIDesktopWindow:
         if shape is None:
             return False
         self._shape = shape
+        for clip in CLIPS:  # work out every pose's outline now, not in the middle of an animation
+            self._sprites.silhouette_union(self._pose_family(clip), grow_x=0, grow_y=self._breathing_room())
         self._update_shape()
         return True
+
+    def _breathing_room(self) -> int:
+        """Pixels of margin above and below her outline for her breathing (she only moves up and down)."""
+        bank = self._sprites
+        return max(1, round(2.2 * bank.zoom / bank.sub))
 
     def _pose_family(self, clip: str) -> tuple[str, ...]:
         return BASE_POSE if clip in BASE_POSE else (clip,)
@@ -314,8 +324,7 @@ class BabyAIDesktopWindow:
         if key == self._shape_key:
             return
         bank = self._sprites
-        grow_y = max(1, round(2.2 * bank.zoom / bank.sub))  # room for her breathing (she only moves up and down)
-        outline = bank.silhouette_union(family, grow_x=0, grow_y=grow_y)
+        outline = bank.silhouette_union(family, grow_x=0, grow_y=self._breathing_room())
         if outline is None:
             self._drop_shape()
             return
@@ -390,6 +399,7 @@ class BabyAIDesktopWindow:
         if any(name in missing for name in ("idle", "blink", "mouth")):
             print("Capri's sprites could not be loaded; using the stick figure.")
             return
+        bank.warm()
         self._sprites = bank
         self._animator = Animator(time.monotonic())
         self._pet = PetDetector(min_step_px=max(3.0, 6.0 * bank.zoom / bank.sub))
@@ -413,6 +423,7 @@ class BabyAIDesktopWindow:
         self._bubble_bottom = SPRITE_BOTTOM - height + int(height * SPRITE_HAIR) - TAIL - 4
         self._body_item = self.canvas.create_image(WIDTH // 2, SPRITE_BOTTOM, anchor="s", tags="figure")
         self._mouth_item = self.canvas.create_image(WIDTH // 2, SPRITE_BOTTOM, anchor="s", tags="figure")
+        self._body_y = SPRITE_BOTTOM
         self._update_body(time.monotonic())
 
     def _speaking(self) -> bool:
@@ -437,9 +448,10 @@ class BabyAIDesktopWindow:
             jaw = bank.cell("mouth", frame.mouth) if frame.mouth >= 0 else None
             c.itemconfigure(self._mouth_item, image=jaw if jaw is not None else "")
         y = SPRITE_BOTTOM + round(frame.breathe * bank.zoom / bank.sub)
-        self._body_y = y
-        c.coords(self._body_item, WIDTH // 2, y)
-        c.coords(self._mouth_item, WIDTH // 2, y)
+        if y != self._body_y:  # moving an item makes Tk repaint it, so only do it when she actually moved
+            self._body_y = y
+            c.coords(self._body_item, WIDTH // 2, y)
+            c.coords(self._mouth_item, WIDTH // 2, y)
 
     def _body_hit(self, x: int, y: int) -> bool:
         """Is the pointer over her (not over the see-through part of her frame)?"""
@@ -683,8 +695,9 @@ class BabyAIDesktopWindow:
         dirty = False
         now = time.monotonic()
         if not self._thinking and self._shown < self._target:
-            self._shown = max(self._shown, letters_revealed(now - self._reveal_start, self._target))
-            dirty = True
+            shown = max(self._shown, letters_revealed(now - self._reveal_start, self._target))
+            dirty = shown != self._shown  # redraw the bubble only when a new letter has appeared
+            self._shown = shown
         if self._pet_due is not None and now >= self._pet_due:
             self._pet_due = None
             if not (self._busy or self._input_open or self._thinking or self._confirm):
@@ -704,7 +717,14 @@ class BabyAIDesktopWindow:
         if dirty:
             self._render_bubble()
         self._update_shape()
-        self._tick_id = self.root.after(TICK_MS, self._tick)
+        self._tick_id = self.root.after(self._tick_delay(), self._tick)
+
+    def _tick_delay(self) -> int:
+        """Milliseconds until the next tick, counted from when it was due rather than from now, so the time a
+        tick takes doesn't stretch the rhythm. If we fall behind we carry on from now instead of catching up in a burst."""
+        now = time.monotonic()
+        self._tick_due = max(self._tick_due + TICK_MS / 1000, now)
+        return max(1, round((self._tick_due - now) * 1000))
 
     # ------------------------------------------------------------- interaction
 

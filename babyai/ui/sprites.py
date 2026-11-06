@@ -131,6 +131,13 @@ class SpriteBank:
             self._cells[key] = image
         return self._cells[key]
 
+    def warm(self) -> None:
+        """Make every frame now (a couple of ms each) instead of the first time it is shown, which would
+        make the animation hitch."""
+        for name, clip in CLIPS.items():
+            for index in range(clip.cells):
+                self.cell(name, index)
+
     def silhouette(self, name: str, index: int) -> list[Rect] | None:
         """Rectangles covering the solid pixels of one frame, or None if they can't be worked out
         (the cache file is missing or not in the layout Tk writes). Used to clip the window to her outline."""

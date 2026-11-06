@@ -338,6 +338,67 @@ class OverlayTests(unittest.TestCase):
                     for x, y, w, h in win._sprites.silhouette(clip, cell):
                         self.assertTrue(shown(ox + x, oy + y + dy) and shown(ox + x + w - 1, oy + y + h - 1 + dy), (clip, cell, dy))
 
+    # ---- smoothness: her frames should land on time and nothing should hitch the first time it is used
+
+    def test_every_frame_is_made_before_she_starts(self):
+        """Making a frame the first time it is shown (a few ms each) made her hitch."""
+        from babyai.ui.capri_body import CLIPS as clips
+
+        win = self.window()
+        wanted = {(name, cell) for name, clip in clips.items() for cell in range(clip.cells)}
+        self.assertEqual(wanted - set(win._sprites._cells), set())
+
+    def test_every_outline_is_worked_out_before_she_starts(self):
+        win = self.window()
+        if win._shape is None:
+            self.skipTest("no X11 shape here")
+        for clip in CLIPS:
+            key = (win._pose_family(clip), 0, win._breathing_room())
+            self.assertIn(key, win._sprites._unions, f"{clip}'s outline would be worked out mid-animation")
+
+    def test_the_tick_is_much_shorter_than_her_fastest_frame(self):
+        """With a coarse tick a 15 fps frame was held 40 ms, then 80 ms (uneven); at ~16 ms it stays within a few ms."""
+        from babyai.ui.app import TICK_MS
+
+        fastest = min(1000 / clip.fps for clip in CLIPS.values())
+        self.assertLessEqual(TICK_MS * 3, fastest)
+
+    def test_ticks_keep_their_rhythm_and_never_burst(self):
+        from babyai.ui.app import TICK_MS
+
+        win = self.window()
+        now = time.monotonic()
+        win._tick_due = now  # a tick that was due right now, and has taken 5 ms to run
+        time.sleep(0.005)
+        delay = win._tick_delay()
+        self.assertAlmostEqual(win._tick_due, now + TICK_MS / 1000, places=6)  # the next one is due a tick after the last was due ...
+        self.assertLessEqual(delay, TICK_MS - 4)  # ... so the 5 ms already spent is not added on top
+        win._tick_due = time.monotonic() - 2.0  # far behind (the machine stalled): carry on from now, don't catch up in a burst
+        self.assertEqual(win._tick_delay(), 1)
+        self.assertGreaterEqual(win._tick_due, time.monotonic() - 0.05)
+
+    def test_the_bubble_is_redrawn_once_per_letter_not_once_per_tick(self):
+        win = self.window()
+        self.pump(win, 1.2, until=lambda: win._body_drawn[0] == "idle")
+        renders = []
+        real = win._render_bubble
+        win._render_bubble = lambda *a, **k: (renders.append(1), real(*a, **k))[1]
+        text = "Pets logged. Morale up twelve percent."
+        win._set_reply(text)
+        renders.clear()
+        self.pump(win, 4.0, until=lambda: win._shown >= win._target)
+        self.assertEqual(win._shown, win._target)
+        self.assertLessEqual(len(renders), len(text) + 2)  # one per new letter; per tick would be ~2x that or more
+
+    def test_she_only_moves_when_breathing_takes_her_a_whole_pixel(self):
+        win = self.window()
+        self.pump(win, 1.2, until=lambda: win._body_drawn[0] == "idle")
+        moves = []
+        real = win.canvas.coords
+        win.canvas.coords = lambda item, *a: (moves.append(item) if a and item == win._body_item else None, real(item, *a))[1]
+        self.pump(win, 2.0)
+        self.assertLessEqual(len(moves), 12, "she moved on nearly every tick")
+
     def test_the_shape_follows_the_bubble_as_it_grows(self):
         win = self.window()
         if win._shape is None:
