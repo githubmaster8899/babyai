@@ -241,6 +241,129 @@ class OverlayTests(unittest.TestCase):
         self.assertFalse(win._clock.asleep)
         self.assertEqual(win._animator.clip, "arrive")
 
+    # ---- typing on a desktop where the borderless window can't take keys (Wayland): the typing box
+
+    def open_box(self, **ui):
+        win = self.window(typing="box", **ui)
+        self.pump(win, 0.3)
+        win._toggle_input()
+        self.pump(win, 0.2)
+        self.assertIsNotNone(win._typing_box)
+        return win, win._typing_box
+
+    def bubble_text(self, win):
+        return " ".join(str(win.canvas.itemcget(i, "text")) for i in win.canvas.find_withtag("bubble") if win.canvas.type(i) == "text")
+
+    def test_the_box_takes_the_keys_and_her_bubble_mirrors_them(self):
+        win, box = self.open_box()
+        self.assertTrue(win._input_open)
+        box.entry.insert("end", "hello there")
+        self.assertEqual(win._draft, "hello there")
+        self.assertIn("hello there", self.bubble_text(win))
+
+    def test_return_in_the_box_sends_what_was_typed_and_closes_it(self):
+        win, box = self.open_box()
+        sent = []
+        win._submit = sent.append
+        box.entry.insert("end", "what's the weather")
+        box.entry.focus_force()
+        box.entry.event_generate("<Return>")
+        self.pump(win, 0.2)
+        self.assertEqual(sent, ["what's the weather"])
+        self.assertIsNone(win._typing_box)
+        self.assertFalse(win._input_open)
+
+    def test_return_on_an_empty_box_keeps_it_open(self):
+        win, box = self.open_box()
+        win._submit = lambda text: self.fail("nothing to send")
+        box.entry.focus_force()
+        box.entry.event_generate("<Return>")
+        self.pump(win, 0.2)
+        self.assertIs(win._typing_box, box)
+
+    def test_escape_in_the_box_closes_only_the_box(self):
+        win, box = self.open_box()
+        box.entry.insert("end", "never mind")
+        box.entry.focus_force()
+        box.entry.event_generate("<Escape>")
+        self.pump(win, 0.2)
+        self.assertIsNone(win._typing_box)
+        self.assertFalse(win._input_open)
+        self.assertEqual(win._draft, "")
+        self.assertTrue(win.root.winfo_exists())  # Esc on the overlay quits; in the box it must not
+
+    def test_closing_the_box_window_cancels_the_input(self):
+        win, box = self.open_box()
+        box.window.tk.call(box.window.protocol("WM_DELETE_WINDOW"))  # what the window manager's close button runs
+        self.pump(win, 0.2)
+        self.assertIsNone(win._typing_box)
+        self.assertFalse(win._input_open)
+
+    def test_the_box_cannot_hold_more_than_a_message_may_be(self):
+        from babyai.ui.app import MAX_DRAFT
+
+        win, box = self.open_box()
+        box.entry.insert("end", "x" * (MAX_DRAFT + 50))
+        self.assertEqual(len(win._draft), MAX_DRAFT)
+
+    def test_a_question_from_the_safety_gate_takes_the_box_away(self):
+        win, box = self.open_box()
+        box.entry.insert("end", "half a thought")
+        answers = []
+        worker = threading.Thread(target=lambda: answers.append(win._confirm_from_worker("write_file", {}, {"risk_level": "MEDIUM"})))
+        worker.start()
+        self.assertTrue(self.pump(win, 3.0, until=lambda: win._confirm is not None))
+        self.assertIsNone(win._typing_box)  # her question comes first; the buttons still answer it
+        self.assertFalse(win._input_open)
+        win._answer_confirm(False)
+        worker.join(3)
+        self.assertEqual(answers, [False])
+
+    def test_quitting_takes_the_box_with_it(self):
+        win, box = self.open_box()
+        win.close()
+        self.assertIsNone(win._typing_box)
+        with self.assertRaises(tk.TclError):
+            box.window.winfo_exists()
+
+    def test_the_box_sits_on_the_screen_above_her_bubble(self):
+        win, box = self.open_box()
+        win.root.update_idletasks()
+        window = box.window
+        self.assertGreaterEqual(window.winfo_rooty(), 0)
+        self.assertLessEqual(window.winfo_rooty() + window.winfo_reqheight(), window.winfo_screenheight())
+        _left, top, _right, _bottom = win._bubble_box
+        self.assertLessEqual(window.winfo_rooty() + window.winfo_reqheight(), win.root.winfo_rooty() + top + 1)
+
+    def test_bubble_mode_keeps_typing_in_her_bubble(self):
+        win = self.window(typing="bubble")
+        self.pump(win, 0.3)
+        win._toggle_input()
+        self.assertTrue(win._input_open)
+        self.assertIsNone(win._typing_box)
+        win._on_key(SimpleNamespace(keysym="h", char="h", state=0))
+        self.assertEqual(win._draft, "h")
+
+    def test_if_the_box_cannot_be_made_she_falls_back_to_her_bubble(self):
+        import babyai.ui.app as app_module
+
+        win = self.window(typing="box")
+        self.pump(win, 0.3)
+
+        def broken(*args, **kwargs):
+            raise tk.TclError("no second window")
+
+        real, app_module.TypingBox = app_module.TypingBox, broken
+        try:
+            win._toggle_input()
+        finally:
+            app_module.TypingBox = real
+        self.assertTrue(win._input_open)
+        self.assertIsNone(win._typing_box)
+        self.assertFalse(win._typing_via_box)
+        win._on_key(SimpleNamespace(keysym="a", char="a", state=0))
+        self.assertEqual(win._draft, "a")
+
     def test_pencil_and_mic_do_nothing_while_a_question_is_open(self):
         win = self.window()
         win._confirm = {"text": "Can I?", "event": threading.Event(), "answer": False, "deadline": time.monotonic() + 30}

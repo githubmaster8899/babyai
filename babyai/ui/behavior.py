@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Mapping
 
 THINK_AFTER_S = 15.0  # show the "THINKING… N s" counter once a reply takes this long
 SLEEP_AFTER_S = 600.0  # idle time before the figure falls asleep (0 turns auto-sleep off)
@@ -111,3 +112,14 @@ def timings_from_config(config: object) -> UiTimings:
         ok = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0
         values[name] = float(value) if ok else getattr(defaults, name)
     return UiTimings(**values)
+
+
+def needs_typing_box(setting: object, windowing: str, env: Mapping[str, str]) -> bool:
+    """Should typing go through the box? ``windowing`` is Tk's windowing system ("x11", "win32", "aqua")."""
+    choice = str(setting or "auto").strip().lower()
+    if choice in ("box", "popup"):
+        return True
+    if choice in ("bubble", "inline"):
+        return False
+    wayland = env.get("XDG_SESSION_TYPE", "").strip().lower() == "wayland" or bool(env.get("WAYLAND_DISPLAY"))
+    return windowing == "x11" and wayland

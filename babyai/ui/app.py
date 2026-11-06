@@ -8,8 +8,10 @@ No separate Capri process is involved.
 
 * the bubble is a transcript: a dim ``> you:`` line, then her reply in monospace
   that types itself out at Capri's 28 letters a second while her mouth follows the
-  letters; your own typing appears inline on the ``> you:`` line, so there is no
-  separate input box;
+  letters; your own typing appears inline on the ``> you:`` line. Where a borderless
+  window can't take keyboard focus (Wayland desktops, via XWayland) a small "Talk to ..."
+  box catches the keys instead and the bubble mirrors them (``[ui] typing``, see
+  babyai.ui.typing_box);
 * pencil = type a message, wave = voice input; stroke the pointer back and forth
   over her to pet her; right-click for Sleep / Wake / Quit;
 * when a tool call needs your say-so (the safety gate), the bubble asks and you
@@ -30,6 +32,7 @@ Transparency depends on the platform / compositor:
 from __future__ import annotations
 
 import math
+import os
 import queue
 import threading
 import time
@@ -37,10 +40,11 @@ import tkinter as tk
 from tkinter import font as tkfont
 from typing import TYPE_CHECKING
 
-from babyai.ui.behavior import SleepClock, eye_offset, thinking_label, timings_from_config
+from babyai.ui.behavior import SleepClock, eye_offset, needs_typing_box, thinking_label, timings_from_config
 from babyai.ui.capri_body import CLIPS, Animator, PetDetector, letters_revealed, mouth_cell, pet_line
 from babyai.ui.persona import apply_character
 from babyai.ui.sprites import DEFAULT_SCALE, SpriteBank
+from babyai.ui.typing_box import TypingBox
 from babyai.ui.xshape import XShape
 
 if TYPE_CHECKING:  # the UI only relies on the assistant's public methods at runtime
@@ -224,6 +228,9 @@ class BabyAIDesktopWindow:
         self._body_y = SPRITE_BOTTOM  # where her frame sits right now (it breathes)
         self._shape: XShape | None = None  # clips the window to her outline on X11
         self._shape_key: tuple | None = None
+        ui = (getattr(assistant, "config", None) or {}).get("ui", {})
+        self._typing_via_box = needs_typing_box(ui.get("typing", "auto"), self._windowing, os.environ)
+        self._typing_box: TypingBox | None = None  # catches the keys when the borderless window can't (see typing_box.py)
 
         self._make_fonts()
         self._load_character()
@@ -740,13 +747,47 @@ class BabyAIDesktopWindow:
         self._input_open = True
         self._draft = ""
         self._render_bubble()
-        self.canvas.focus_force()
+        if not (self._typing_via_box and self._show_typing_box()):
+            self.canvas.focus_force()
 
     def _close_input(self) -> None:
         self._input_open = False
         self._draft = ""
+        self._hide_typing_box()
         self._render_bubble()
         self.root.focus_set()
+
+    def _show_typing_box(self) -> bool:
+        """Open the little window that takes the keys; what is typed there shows in her bubble. False if it can't be made."""
+        self._hide_typing_box()
+        box = None
+        try:
+            box = TypingBox(
+                self.root, f"Talk to {self._assistant_name()}", MAX_DRAFT, self._typed_in_box, self._send, self._close_input,
+                dict(bg=PANEL_BG, field=BUBBLE_FILL, text=REPLY_FG, accent=NEON, dim=DIM), self.font_echo,
+            )
+            left, top, right, _bottom = self._bubble_box or (BUBBLE_L, 0, BUBBLE_R, 0)
+            box.place_above(self.root.winfo_rootx() + (left + right) // 2, self.root.winfo_rooty() + top - 8)
+        except tk.TclError:
+            if box is not None:
+                box.destroy()
+            self._typing_via_box = False  # no second window possible here: keep typing in her bubble
+            return False
+        self._typing_box = box
+        box.focus()
+        return True
+
+    def _hide_typing_box(self) -> None:
+        box, self._typing_box = self._typing_box, None
+        if box is not None:
+            box.destroy()
+
+    def _typed_in_box(self, text: str) -> None:
+        if not self._input_open:
+            return
+        self._wake()
+        self._draft = text
+        self._render_bubble()
 
     def _on_key(self, event) -> str | None:
         self._wake()
@@ -783,6 +824,7 @@ class BabyAIDesktopWindow:
             return
         self._input_open = False
         self._draft = ""
+        self._hide_typing_box()
         self._submit(text)
 
     def _submit(self, text: str) -> None:
@@ -853,6 +895,10 @@ class BabyAIDesktopWindow:
     def _begin_confirm(self, request: dict) -> None:
         request["deadline"] = time.monotonic() + CONFIRM_TIMEOUT_S
         self._confirm = request
+        if self._typing_box is not None:  # her question comes first: the keys would otherwise go into the box
+            self._hide_typing_box()
+            self._input_open = False
+            self._draft = ""
         self._wake()
         self._set_reply(request["text"])
         self.canvas.focus_force()
@@ -931,6 +977,7 @@ class BabyAIDesktopWindow:
             self.menu.grab_release()
 
     def close(self, _event=None) -> None:
+        self._hide_typing_box()
         if self._shape is not None:
             self._shape.close()
             self._shape = None
