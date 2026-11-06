@@ -2,7 +2,7 @@ import struct
 import unittest
 import zlib
 
-from babyai.ui.silhouette import alpha_rows, solid_rects
+from babyai.ui.silhouette import alpha_rows, solid_rects, union_rects
 
 
 def png(width, height, alpha_at, color=6, depth=8, interlace=0, filters=None):
@@ -72,6 +72,44 @@ class SolidRectsTests(unittest.TestCase):
     def test_rows_with_different_runs_are_not_merged(self):
         got = self.rects(6, 2, lambda x, y: (x < 2) if y == 0 else (x < 4))
         self.assertEqual(sorted(got), [(0, 0, 2, 1), (0, 1, 4, 1)])
+
+
+class UnionRectsTests(unittest.TestCase):
+    def strip(self, width, height, cells, solid):
+        """alpha rows of a strip of `cells` frames, each `width` wide; solid(cell, x, y) says which pixels are her"""
+        return alpha_rows(png(width * cells, height, lambda X, y: 255 if solid(X // width, X % width, y) else 0))
+
+    def test_it_covers_every_frame_and_nothing_else(self):
+        solid = lambda c, x, y: (x == 1 + c and 2 <= y < 5)  # a bar that steps right each frame
+        rows = self.strip(8, 8, 3, solid)
+        rects = union_rects([(rows, [0, 1, 2])], 8)
+        self.assertEqual(covered(rects, 8, 8), {(x, y) for x in (1, 2, 3) for y in (2, 3, 4)})
+
+    def test_only_the_frames_asked_for(self):
+        rows = self.strip(8, 8, 3, lambda c, x, y: x == 1 + c and y == 0)
+        self.assertEqual(covered(union_rects([(rows, [0, 2])], 8), 8, 8), {(1, 0), (3, 0)})
+
+    def test_growing_adds_a_margin_and_may_leave_the_frame(self):
+        rows = self.strip(6, 6, 1, lambda c, x, y: (x, y) == (3, 0))
+        up_down = covered(union_rects([(rows, [0])], 6, grow_x=0, grow_y=2), 6, 6)
+        self.assertEqual(up_down, {(3, y) for y in range(-2, 3)})  # above the top edge too: callers clamp
+        sideways = covered(union_rects([(rows, [0])], 6, grow_x=1, grow_y=0), 6, 6)
+        self.assertEqual(sideways, {(2, 0), (3, 0), (4, 0)})
+
+    def test_growing_stops_at_the_frames_sides(self):
+        rows = self.strip(4, 3, 1, lambda c, x, y: x == 0 and y == 1)
+        self.assertEqual(covered(union_rects([(rows, [0])], 4, grow_x=2), 4, 3), {(0, 1), (1, 1), (2, 1)})
+
+    def test_several_strips_are_combined(self):
+        a = self.strip(4, 4, 1, lambda c, x, y: (x, y) == (0, 0))
+        b = self.strip(4, 4, 1, lambda c, x, y: (x, y) == (3, 3))
+        self.assertEqual(covered(union_rects([(a, [0]), (b, [0])], 4), 4, 4), {(0, 0), (3, 3)})
+
+    def test_strips_of_different_heights_are_refused(self):
+        a = self.strip(4, 4, 1, lambda c, x, y: True)
+        b = self.strip(4, 5, 1, lambda c, x, y: True)
+        self.assertIsNone(union_rects([(a, [0]), (b, [0])], 4))
+        self.assertIsNone(union_rects([], 4))
 
 
 if __name__ == "__main__":

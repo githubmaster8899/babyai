@@ -43,7 +43,8 @@ def make_sprites(directory):
     for name, clip in CLIPS.items():
         strip = tk.PhotoImage(width=clip.cells * CELL_W, height=CELL_H)
         for cell in range(clip.cells):
-            strip.put("#ff2d7d", to=(cell * CELL_W + 4, 4, cell * CELL_W + 20, CELL_H - 2))  # a solid block, rest see-through
+            shift = cell % 3  # the block wobbles from frame to frame, like her hair does
+            strip.put("#ff2d7d", to=(cell * CELL_W + 4 + shift, 4, cell * CELL_W + 20 + shift, CELL_H - 2))  # solid, rest see-through
         strip.write(os.path.join(directory, f"{name}.png"), format="png")
 
 
@@ -286,6 +287,56 @@ class OverlayTests(unittest.TestCase):
         self.assertTrue(covers(pill, 250, 600) and covers(pill, 205, 600) and covers(pill, 250, 580))
         self.assertFalse(covers(pill, 200, 580), "the rounded pill corner is not part of it")
         self.assertFalse(covers(pill, 299, 619))
+
+    def count_shape_rewrites(self, win):
+        calls = []
+        real = win._shape.set_rects
+        win._shape.set_rects = lambda rects: (calls.append(len(rects)), real(rects))[1]
+        return calls
+
+    def test_animating_does_not_re_cut_the_window(self):
+        """Re-cutting the shape on every frame (or every breathing step) made her flicker on a real desktop."""
+        win = self.window()
+        if win._shape is None:
+            self.skipTest("no X11 shape here")
+        self.pump(win, 2.0, until=lambda: win._body_drawn[0] == "idle")
+        self.pump(win, 0.3)
+        calls = self.count_shape_rewrites(win)
+        frames = set()
+        self.pump(win, 3.0, until=lambda: frames.add(win._body_drawn[:2]) and False)  # idle frames pass by, and she breathes
+        self.assertGreater(len(frames), 8, "the animation should have been running")
+        self.assertEqual(calls, [], "the shape must not change while she idles")
+
+    def test_the_shape_changes_when_she_changes_pose_family(self):
+        win = self.window()
+        if win._shape is None:
+            self.skipTest("no X11 shape here")
+        self.pump(win, 2.0, until=lambda: win._body_drawn[0] == "idle")
+        self.pump(win, 0.3)
+        calls = self.count_shape_rewrites(win)
+        win._animator.play("grin", time.monotonic())  # same family as idle: no change
+        self.pump(win, 0.5)
+        self.assertEqual(calls, [])
+        win._animator.play("glitch", time.monotonic())  # a different family: the shape is re-cut once
+        self.pump(win, 0.3)
+        self.assertEqual(len(calls), 1)
+
+    def test_every_pose_and_breathing_step_stays_inside_the_shape(self):
+        win = self.window()
+        if win._shape is None:
+            self.skipTest("no X11 shape here")
+        from babyai.ui.app import SPRITE_BOTTOM, WIDTH
+
+        self.pump(win, 0.3)
+        width, height = win._sprites.cell_size
+        rects = win._shape.get_rects()
+        shown = lambda x, y: any(rx <= x < rx + rw and ry <= y < ry + rh for rx, ry, rw, rh in rects)
+        ox, oy = (WIDTH - width) // 2, SPRITE_BOTTOM - height
+        for clip in ("idle", "blink", "blink_glitch", "grin"):
+            for cell in range(CLIPS[clip].cells):
+                for dy in (-1, 0, 1):  # her breathing
+                    for x, y, w, h in win._sprites.silhouette(clip, cell):
+                        self.assertTrue(shown(ox + x, oy + y + dy) and shown(ox + x + w - 1, oy + y + h - 1 + dy), (clip, cell, dy))
 
     def test_the_shape_follows_the_bubble_as_it_grows(self):
         win = self.window()

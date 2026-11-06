@@ -21,7 +21,7 @@ from fractions import Fraction
 from pathlib import Path
 
 from babyai.ui.capri_body import CLIPS
-from babyai.ui.silhouette import Rect, alpha_rows, solid_rects
+from babyai.ui.silhouette import Rect, alpha_rows, solid_rects, union_rects
 
 SPRITE_DIR = Path(__file__).resolve().parent.parent.parent / "capri" / "assets" / "sprites"
 REQUIRED = ("idle", "blink", "mouth")  # without these there is no figure worth drawing
@@ -53,6 +53,7 @@ class SpriteBank:
         self._cells: dict[tuple[str, int], tk.PhotoImage] = {}
         self._alpha: dict[str, list[bytes] | None] = {}
         self._outlines: dict[tuple[str, int], list[Rect] | None] = {}
+        self._unions: dict[tuple, list[Rect] | None] = {}
 
     # ------------------------------------------------------------------ loading
 
@@ -143,6 +144,22 @@ class SpriteBank:
                 width = strip.width() // CLIPS[name].cells
                 self._outlines[key] = solid_rects(rows, index * width, width)
         return self._outlines[key]
+
+    def silhouette_union(self, names: tuple[str, ...], grow_x: int = 0, grow_y: int = 0) -> list[Rect] | None:
+        """One outline covering every frame of these clips, grown a little all round. Clipping the window to
+        this (instead of to each frame) keeps the shape still while she animates. None if it can't be worked out."""
+        key = (names, grow_x, grow_y)
+        if key not in self._unions:
+            sources, width = [], 0
+            for name in names:
+                rows, strip = self._alpha_rows(name), self.strip(name)
+                if rows is None or strip is None:
+                    sources = []
+                    break
+                width = strip.width() // CLIPS[name].cells
+                sources.append((rows, list(range(CLIPS[name].cells))))
+            self._unions[key] = union_rects(sources, width, grow_x, grow_y) if sources else None
+        return self._unions[key]
 
     def _alpha_rows(self, name: str) -> list[bytes] | None:
         if name not in self._alpha:

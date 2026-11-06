@@ -60,12 +60,11 @@ def alpha_rows(png: bytes) -> list[bytes] | None:
     return rows
 
 
-def solid_rects(rows: list[bytes], x0: int, width: int) -> list[Rect]:
-    """Rectangles covering the solid pixels of columns [x0, x0 + width); equal runs on neighbouring rows are merged."""
+def _rects_from_masks(masks: list[bytes]) -> list[Rect]:
+    """Rectangles for rows of 0/1 bytes; equal runs on neighbouring rows are merged into one rectangle."""
     done: list[Rect] = []
     open_runs: dict[tuple[int, int], int] = {}  # (x, run width) -> row it started on
-    for y, row in enumerate(rows):
-        cut = row[x0:x0 + width].translate(_SOLID)
+    for y, cut in enumerate(masks):
         runs = {(m.start(), m.end() - m.start()) for m in _RUN.finditer(cut)}
         for run in [r for r in open_runs if r not in runs]:
             start = open_runs.pop(run)
@@ -73,5 +72,40 @@ def solid_rects(rows: list[bytes], x0: int, width: int) -> list[Rect]:
         for run in runs:
             open_runs.setdefault(run, y)
     for (x, w), start in open_runs.items():
-        done.append((x, start, w, len(rows) - start))
+        done.append((x, start, w, len(masks) - start))
     return done
+
+
+def solid_rects(rows: list[bytes], x0: int, width: int) -> list[Rect]:
+    """Rectangles covering the solid pixels of columns [x0, x0 + width)."""
+    return _rects_from_masks([row[x0:x0 + width].translate(_SOLID) for row in rows])
+
+
+def union_rects(sources: list[tuple[list[bytes], list[int]]], width: int, grow_x: int = 0, grow_y: int = 0) -> list[Rect] | None:
+    """One shape covering every solid pixel of many frames, grown by grow_x / grow_y pixels all round.
+
+    ``sources`` is a list of (alpha rows of a strip, indices of the frames wanted from it); ``width`` is a
+    frame's width. Clipping a window to this instead of to each frame separately means the shape does not
+    have to change while she animates (re-cutting it every frame makes her flicker). The rectangles can
+    reach ``grow_y`` pixels above and below the frame (negative y / y beyond the height), so callers clamp.
+    Returns None if the strips are not all the same height."""
+    heights = {len(rows) for rows, _ in sources}
+    if len(heights) != 1 or not sources:
+        return None
+    height = heights.pop()
+    full = (1 << (8 * width)) - 1
+    merged = [0] * height
+    for rows, indices in sources:
+        for y, row in enumerate(rows):
+            for index in indices:
+                merged[y] |= int.from_bytes(row[index * width:(index + 1) * width].translate(_SOLID), "big")
+    for _ in range(grow_x):
+        merged = [(m | (m << 8) | (m >> 8)) & full for m in merged]
+    padded = [0] * grow_y + merged + [0] * grow_y
+    grown = []
+    for y in range(len(padded)):
+        m = 0
+        for k in range(max(0, y - grow_y), min(len(padded), y + grow_y + 1)):
+            m |= padded[k]
+        grown.append(m.to_bytes(width, "big"))
+    return [(x, y - grow_y, w, h) for x, y, w, h in _rects_from_masks(grown)]

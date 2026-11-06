@@ -77,6 +77,9 @@ ICON = "#ffffff"
 BUBBLE_L, BUBBLE_R, BUBBLE_BOTTOM = 60, 500, 290  # the bubble grows upward from its bottom edge (stick figure)
 SPRITE_BOTTOM = 576  # canvas y of the bottom edge of her sprite frame
 SPRITE_HAIR = 0.10  # fraction of the frame above the top of her hair
+# Her window is clipped to one outline per pose family, not per frame: re-cutting the shape on every animation
+# frame made her flicker (newly exposed bits show the dark background until Tk repaints them).
+BASE_POSE = ("idle", "blink", "blink_glitch", "grin")  # the same stance; every other clip is its own family
 TAIL = 16
 MAX_LINES = 8
 MAX_CHARS = 420
@@ -297,21 +300,27 @@ class BabyAIDesktopWindow:
         self._update_shape()
         return True
 
+    def _pose_family(self, clip: str) -> tuple[str, ...]:
+        return BASE_POSE if clip in BASE_POSE else (clip,)
+
     def _update_shape(self) -> None:
         shape = self._shape
         if shape is None or self._body_drawn is None or self._sprites is None or self._bubble_box is None:
             return
         left, top, right, bottom = self._bubble_box
         pill = self.canvas.bbox("pill")
-        key = (self._body_drawn[:2], self._body_y, self._bubble_box, pill)
+        family = self._pose_family(self._body_drawn[0])
+        key = (family, self._bubble_box, pill)  # not the frame or the breathing offset: those must not re-cut the shape
         if key == self._shape_key:
             return
-        outline = self._sprites.silhouette(*self._body_drawn[:2])
+        bank = self._sprites
+        grow_y = max(1, round(2.2 * bank.zoom / bank.sub))  # room for her breathing (she only moves up and down)
+        outline = bank.silhouette_union(family, grow_x=0, grow_y=grow_y)
         if outline is None:
             self._drop_shape()
             return
-        width, height = self._sprites.cell_size
-        ox, oy = (WIDTH - width) // 2, self._body_y - height
+        width, height = bank.cell_size
+        ox, oy = (WIDTH - width) // 2, SPRITE_BOTTOM - height
         rects = [(max(0, ox + x), max(0, oy + y), w, h) for x, y, w, h in outline]
         rects += _bubble_rects(left, top, right, bottom)  # the bubble itself ...
         near, far = _tail_span(BUBBLE_L, BUBBLE_R, 10, WIDTH // 2, TAIL)
