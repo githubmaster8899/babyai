@@ -9,11 +9,17 @@ branch away. ``VersionUpdates.rollback`` undoes the last thing that was applied.
 Guard rails, which hold whatever the model asks for:
 
 * edits can only land inside the branch's folder, never through a symlink, and never in PROTECTED paths - the
-  safety rules, this package, the tools that drive it, the place the gate is enforced, and the licence files;
+  safety rules and gate, the place the gate is enforced, the licence files, and the test file below;
 * a change goes live only through ``apply``, which needs the tests to have passed on the same commit;
 * nothing here pushes anywhere or touches any other branch.
 
-These are guard rails for this workflow, not a sandbox: with the user's approval he still has ``run_shell``.
+He may change this package too (UPGRADE_CODE). Then what holds him back can't live only in code he can edit, so
+``tests/test_guardrails.py`` is protected and pins these rules: a change that weakens one of them fails that file,
+and a change whose tests fail is never applied. The change is also flagged in what the user is asked, and takes effect
+only after a restart - the code that checks and applies it is still the version he is running, not the new one.
+
+These are guard rails against mistakes and sloppy edits, not a sandbox: with the user's approval he still has
+``run_shell``, and the user reading the diff before saying yes is the real control.
 """
 
 from __future__ import annotations
@@ -37,15 +43,18 @@ from babyai.upgrade.gitops import (
 
 PROTECTED = (
     "babyai/safety/",  # the rules and the gate
-    "babyai/upgrade/",  # this workflow
-    "babyai/tools/upgrade.py",  # the tools that drive it
     "babyai/agent/core.py",  # where the gate is enforced
     "tests/test_safety.py",
-    "tests/test_upgrade.py",
+    "tests/test_guardrails.py",  # pins how the upgrade code below must behave
     "NOTICE",
     "LICENSE",
     "capri/LICENSE.md",  # Capri's licence notices must stay intact
     ".git/",
+)
+UPGRADE_CODE = (  # his own upgrade machinery: he may change it, and the user is told when he does
+    "babyai/upgrade/",
+    "babyai/tools/upgrade.py",
+    "tests/test_upgrade.py",
 )
 MAX_FILE_BYTES = 200_000
 MAX_FILES = 40
@@ -58,6 +67,12 @@ def is_protected(relative: str) -> bool:
     if ".git" in parts:
         return True
     return any(lowered == rule.rstrip("/") or lowered.startswith(rule) for rule in (p.lower() for p in PROTECTED))
+
+
+def edits_upgrade_code(names: Sequence[str]) -> list[str]:
+    """Those of ``names`` that are part of his own upgrade machinery."""
+    rules = [rule.lower() for rule in UPGRADE_CODE]
+    return [name for name in names if any(name.lower().strip("/") == rule.rstrip("/") or name.lower().startswith(rule) for rule in rules)]
 
 
 class CodeUpgrades:
@@ -111,7 +126,7 @@ class CodeUpgrades:
         for candidate in (text, real.relative_to(root).as_posix()):
             if is_protected(candidate):
                 raise UpgradeError(
-                    f"{candidate} is protected (the safety rules, the upgrade tools and the licence files can only be changed by you, by hand)."
+                    f"{candidate} is protected (the safety rules and gate, the guard-rail tests and the licence files can only be changed by you, by hand)."
                 )
         return target
 
@@ -165,6 +180,9 @@ class CodeUpgrades:
         target.write_text(text.replace(old, new, 1), encoding="utf-8")
         return f"Edited {path} on {proposal['branch']}."
 
+    def _changed_between(self, repo: Path, before: str, after: str) -> list[str]:
+        return git(repo, "diff", "--name-only", f"{before}..{after}").splitlines()
+
     def _stat(self, proposal: dict[str, Any], tip: str) -> tuple[str, list[str]]:
         folder = Path(proposal["path"])
         stat = git(folder, "diff", "--shortstat", f"{proposal['base']}..{tip}") or "no changes"
@@ -184,8 +202,10 @@ class CodeUpgrades:
         shown = full if len(full) <= DIFF_TO_MODEL else full[:DIFF_TO_MODEL] + "\n... (cut; the whole diff is in the file below)"
         tests = proposal.get("tests") or {}
         verdict = "tests passed on this version" if tests.get("ok") and tests.get("tip") == tip else "tests have NOT passed on this version yet"
+        own = edits_upgrade_code(names)
+        flag = f" NOTE: this edits my own upgrade code ({', '.join(own)}) - read this diff with extra care; it takes effect after a restart." if own else ""
         return (
-            f"{proposal['branch']}: {stat} ({', '.join(names)}); {verdict}.\n"
+            f"{proposal['branch']}: {stat} ({', '.join(names)}); {verdict}.{flag}\n"
             f"The whole diff is saved at {saved}; the user can also read it with: git -C {self._repo()} diff {short(proposal['base'])}..{proposal['branch']}\n\n{shown}"
         )
 
@@ -210,11 +230,16 @@ class CodeUpgrades:
         shown = {"change": proposal["goal"], "branch": proposal["branch"], "diff": stat, "files": ", ".join(names)[:140] or "none"}
         shown["tests"] = "passed on this version" if passed else "NOT passed on this version"
         shown["protected"] = "untouched"
+        shown["upgrade code"] = "CHANGED (live after restart)" if edits_upgrade_code(names) else "untouched"
         return shown
 
     def preview_test(self) -> dict[str, str]:
         proposal = self._proposal()
-        return {"run the tests on": proposal["branch"], "this runs": "the code I wrote on that branch"}
+        shown = {"run the tests on": proposal["branch"], "this runs": "the code I wrote on that branch"}
+        own = edits_upgrade_code(self._stat(proposal, self._snapshot(proposal))[1])
+        if own:
+            shown["also changes"] = "my own upgrade code"
+        return shown
 
     def apply(self) -> str:
         proposal = self._proposal()
@@ -241,9 +266,12 @@ class CodeUpgrades:
         data["proposal"] = None
         self.journal.save(data)
         git(repo, "worktree", "remove", "--force", proposal["path"], check=False)  # the branch stays, for the record
+        own = edits_upgrade_code(self._changed_between(repo, head, tip))
+        note = " It changes my own upgrade code, so I'll be working differently after the restart." if own else ""
         return (
             f"Applied: {proposal['goal']} ({short(head)} -> {short(tip)}), tests passed. It is live in the files, "
-            "but I only pick it up after a restart (action=restart on upgrade_version). To undo it: upgrade_version rollback."
+            f"but I only pick it up after a restart (action=restart on upgrade_version).{note} "
+            f"To undo it: upgrade_version rollback, or by hand: git -C {repo} reset --hard {short(head)}"
         )
 
     def discard(self) -> str:
