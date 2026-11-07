@@ -45,6 +45,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "sleep_after_s": 600,
         "wake_radius_px": 150,
         "look_radius_px": 250,
+        "bubble_hide_s": 10,  # her speech bubble hides this long after she finishes talking; 0 keeps it up
     },
 }
 

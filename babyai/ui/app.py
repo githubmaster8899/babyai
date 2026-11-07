@@ -40,7 +40,16 @@ import tkinter as tk
 from tkinter import font as tkfont
 from typing import TYPE_CHECKING
 
-from babyai.ui.behavior import SleepClock, eye_offset, needs_typing_box, thinking_label, timings_from_config
+from babyai.ui.behavior import (
+    BubbleTimer,
+    SleepClock,
+    cursor_line,
+    eye_offset,
+    needs_typing_box,
+    scroll_top,
+    thinking_label,
+    timings_from_config,
+)
 from babyai.ui.capri_body import CLIPS, Animator, PetDetector, letters_revealed, mouth_cell, pet_line
 from babyai.ui.persona import apply_character
 from babyai.ui.sprites import DEFAULT_SCALE, SpriteBank
@@ -86,7 +95,8 @@ SPRITE_HAIR = 0.10  # fraction of the frame above the top of her hair
 BASE_POSE = ("idle", "blink", "blink_glitch", "grin")  # the same stance; every other clip is its own family
 TAIL = 16
 MAX_LINES = 8
-MAX_CHARS = 420
+MAX_CHARS = 2000  # a reply longer than this is cut; up to MAX_LINES show at once and the view scrolls along with the typing
+WHEEL_LINES = 1  # lines one notch of the mouse wheel scrolls her bubble
 MAX_DRAFT = 500
 
 # Capri's clips run at 8 and 15 fps and she types 28 letters a second, so a coarse tick makes her uneven (at 40 ms a
@@ -224,7 +234,11 @@ class BabyAIDesktopWindow:
         self._pet_count = 0
         self._pet_due: float | None = None
         self._bubble_bottom = BUBBLE_BOTTOM
-        self._bubble_box: tuple[int, int, int, int] | None = None  # left, top, right, bottom of the bubble (not the tail)
+        self._bubble_box: tuple[int, int, int, int] | None = None  # left, top, right, bottom of the bubble (not the tail); None while hidden
+        self._bubble_hidden = False  # hides a while after she finishes talking (see BubbleTimer)
+        self._bubble_timer = BubbleTimer(self._timings.bubble_hide_s)
+        self._scroll: int | None = None  # first line of a long reply the reader scrolled to; None = follow the typing
+        self._view = (0, 1, 1)  # (first line shown, lines in the reply, lines visible) as last drawn
         self._body_y = SPRITE_BOTTOM  # where her frame sits right now (it breathes)
         self._shape: XShape | None = None  # clips the window to her outline on X11
         self._shape_key: tuple | None = None
@@ -322,9 +336,10 @@ class BabyAIDesktopWindow:
 
     def _update_shape(self) -> None:
         shape = self._shape
-        if shape is None or self._body_drawn is None or self._sprites is None or self._bubble_box is None:
+        if shape is None or self._body_drawn is None or self._sprites is None:
             return
-        left, top, right, bottom = self._bubble_box
+        if self._bubble_box is None and not self._bubble_hidden:
+            return  # not drawn yet
         pill = self.canvas.bbox("pill")
         family = self._pose_family(self._body_drawn[0])
         key = (family, self._bubble_box, pill)  # not the frame or the breathing offset: those must not re-cut the shape
@@ -338,12 +353,14 @@ class BabyAIDesktopWindow:
         width, height = bank.cell_size
         ox, oy = (WIDTH - width) // 2, SPRITE_BOTTOM - height
         rects = [(max(0, ox + x), max(0, oy + y), w, h) for x, y, w, h in outline]
-        rects += _bubble_rects(left, top, right, bottom)  # the bubble itself ...
-        near, far = _tail_span(BUBBLE_L, BUBBLE_R, 10, WIDTH // 2, TAIL)
-        for step in range(TAIL):  # ... and its tail, row by row
-            x1 = near + (WIDTH // 2 - near) * step / TAIL
-            x2 = far - (far - WIDTH // 2) * step / TAIL
-            rects.append((int(x1) - 1, bottom + step + 1, int(x2 - x1) + 3, 1))
+        if self._bubble_box is not None:  # (none while she has hidden it)
+            left, top, right, bottom = self._bubble_box
+            rects += _bubble_rects(left, top, right, bottom)  # the bubble itself ...
+            near, far = _tail_span(BUBBLE_L, BUBBLE_R, 10, WIDTH // 2, TAIL)
+            for step in range(TAIL):  # ... and its tail, row by row
+                x1 = near + (WIDTH // 2 - near) * step / TAIL
+                x2 = far - (far - WIDTH // 2) * step / TAIL
+                rects.append((int(x1) - 1, bottom + step + 1, int(x2 - x1) + 3, 1))
         if pill:
             rects += _pill_rects(*pill)
         try:
@@ -561,6 +578,8 @@ class BabyAIDesktopWindow:
                 self._look = eye_offset(px - head_x, py - head_y, radius=self._timings.look_radius_px)
                 moved = self._last_pointer is not None and (px, py) != self._last_pointer
                 self._last_pointer = (px, py)
+                if self._in_bubble(px - self.root.winfo_rootx(), py - self.root.winfo_rooty()):
+                    self._bubble_timer.touch()  # resting the pointer on her bubble keeps it up
         self._clock.tick(now, distance, moved)
         self._sync_face()
 
@@ -612,6 +631,8 @@ class BabyAIDesktopWindow:
         self._think_since = time.monotonic() if thinking else None
         self._think_text = None
         self._shown = 0  # the reply types itself out from the start
+        self._scroll = None
+        self._bubble_timer.touch()
         self._reveal_start = time.monotonic()
         if self._animator is not None and text and not thinking:
             self._animator.speak(self._reveal_start)  # talking cuts off a sleep, glitch or grin
@@ -630,16 +651,21 @@ class BabyAIDesktopWindow:
         label_px = self.font_label.measure(label) + cw  # the reply starts one space after the label
         label_cols = -(-label_px // cw)  # ceil
 
+        self._bubble_hidden = False  # anything that draws the bubble wants it on screen
         reply = self._reply if len(self._reply) <= MAX_CHARS else self._reply[: MAX_CHARS - 1] + "…"
         lines = _wrap(reply, cols - label_cols, cols) if reply else [""]
-        if len(lines) > MAX_LINES:
-            lines = lines[:MAX_LINES]
-            lines[-1] = lines[-1][: cols - 2].rstrip() + "…"
-        self._target = sum(len(line) + 1 for line in lines)
+        starts, count = [], 0
+        for line in lines:
+            starts.append(count)
+            count += len(line) + 1
+        self._target = count
+        visible = min(len(lines), MAX_LINES)
+        top = scroll_top(len(lines), visible, cursor_line([len(line) for line in lines], self._shown), self._scroll)
+        self._view = (top, len(lines), visible)
 
         has_echo = self._input_open or bool(self._echo)
         pad = 12
-        height = pad * 2 + (len(lines) + (1 if has_echo else 0) + (1 if self._confirm else 0)) * lh
+        height = pad * 2 + (visible + (1 if has_echo else 0) + (1 if self._confirm else 0)) * lh
         c.create_polygon(
             _plate(L, 0, R, height, 10, WIDTH // 2, TAIL),
             fill=BUBBLE_FILL, outline=CYAN, width=2, joinstyle="miter", tags="bubble",
@@ -661,7 +687,8 @@ class BabyAIDesktopWindow:
                 self._block(x0 + self.font_echo.measure(text), y)
             y += lh
 
-        c.create_text(x0, y, anchor="nw", text=label, font=self.font_label, fill=RED, tags="bubble")
+        if top == 0:  # her name labels the start of what she says; it scrolls away with it
+            c.create_text(x0, y, anchor="nw", text=label, font=self.font_label, fill=RED, tags="bubble")
         if self._thinking:
             tx = x0 + label_px
             if self._think_text:
@@ -670,10 +697,11 @@ class BabyAIDesktopWindow:
             if blink_on:
                 self._block(tx, y)
         else:
-            remaining = self._shown
-            for i, line in enumerate(lines):
+            for i in range(top, top + visible):
+                line = lines[i]
                 lx = x0 + (label_px if i == 0 else 0)
-                ly = y + i * lh
+                ly = y + (i - top) * lh
+                remaining = self._shown - starts[i]
                 part = line[: max(0, remaining)]
                 if part:
                     c.create_text(lx, ly, anchor="nw", text=part, font=self.font_mono, fill=REPLY_FG, tags="bubble")
@@ -681,7 +709,11 @@ class BabyAIDesktopWindow:
                     if self._shown < self._target:
                         self._block(lx + self.font_mono.measure(part), ly)
                     break
-                remaining -= len(line) + 1
+            mark_x, first_y = R - 9, y  # in the right-hand margin, clear of the text
+            if top > 0:  # more above / below than fits: small arrows at the right edge
+                self._arrow(mark_x, first_y + 8, up=True)
+            if top + visible < len(lines) and self._shown >= starts[top + visible]:  # typed text below the window (not text still to come)
+                self._arrow(mark_x, first_y + visible * lh - 8, up=False)
 
         if self._confirm:  # answer row: clickable, or press Y / N
             ay = height - pad - lh
@@ -691,6 +723,35 @@ class BabyAIDesktopWindow:
 
         c.move("bubble", 0, self._bubble_bottom - height)
         self._bubble_box = (L, self._bubble_bottom - height, R, self._bubble_bottom)
+
+    def _arrow(self, x: float, y: float, up: bool) -> None:
+        d = 4
+        points = (x - d, y + d, x + d, y + d, x, y - d) if up else (x - d, y - d, x + d, y - d, x, y + d)
+        self.canvas.create_polygon(points, fill=DIM, outline="", tags="bubble")
+
+    def _hide_bubble(self) -> None:
+        """Take the speech bubble away (and its piece of the window shape) until she next has something to say."""
+        self.canvas.delete("bubble")
+        self._bubble_hidden = True
+        self._bubble_box = None
+
+    def _in_bubble(self, x: float, y: float) -> bool:
+        box = self._bubble_box
+        return box is not None and box[0] <= x <= box[2] and box[1] <= y <= box[3]
+
+    def _on_wheel(self, event, direction: int | None = None) -> None:
+        """Scroll a long reply with the mouse wheel over her bubble (up = earlier lines)."""
+        if self._bubble_hidden or not self._in_bubble(event.x, event.y):
+            return
+        self._bubble_timer.touch()
+        top, total, visible = self._view
+        if total <= visible:
+            return
+        if direction is None:
+            direction = 1 if getattr(event, "delta", 0) > 0 else -1
+        want = min(max(0, top - direction * WHEEL_LINES), total - visible)
+        self._scroll = None if want >= total - visible else want  # back at the end: follow the typing again
+        self._render_bubble()
 
     def _block(self, x: float, y: float) -> None:
         self.canvas.create_rectangle(
@@ -720,6 +781,10 @@ class BabyAIDesktopWindow:
         if self._tick_n % BLINK_TICKS == 0 and (self._input_open or self._thinking):
             dirty = True
         self._presence_tick()
+        busy = self._thinking or self._busy or self._input_open or self._confirm is not None or self._shown < self._target
+        if self._bubble_timer.update(now, busy, self._bubble_hidden):
+            self._hide_bubble()
+            dirty = False
         self._update_body(now)
         if dirty:
             self._render_bubble()
@@ -919,6 +984,9 @@ class BabyAIDesktopWindow:
         c.bind("<ButtonRelease-1>", self._end_press)
         c.bind("<B1-Motion>", self._move_window)
         c.bind("<Motion>", self._on_motion)
+        c.bind("<MouseWheel>", self._on_wheel)  # Windows and macOS
+        c.bind("<Button-4>", lambda event: self._on_wheel(event, 1))  # X11
+        c.bind("<Button-5>", lambda event: self._on_wheel(event, -1))
         c.tag_bind("confirm_yes", "<Button-1>", lambda _event: self._answer_confirm(True))
         c.tag_bind("confirm_no", "<Button-1>", lambda _event: self._answer_confirm(False))
         c.bind("<Key>", self._on_key)

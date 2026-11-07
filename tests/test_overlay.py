@@ -86,7 +86,7 @@ class OverlayTests(unittest.TestCase):
             os.environ["XDG_CACHE_HOME"] = self._old_cache
 
     def window(self, **ui):
-        from babyai.ui.app import BabyAIDesktopWindow
+        from babyai.ui.app import NEON, BabyAIDesktopWindow
 
         win = BabyAIDesktopWindow(FakeAssistant(dict(sprite_scale="1", **ui)))
         self.windows.append(win)
@@ -240,6 +240,188 @@ class OverlayTests(unittest.TestCase):
         win.root.update()  # first tick
         self.assertFalse(win._clock.asleep)
         self.assertEqual(win._animator.clip, "arrive")
+
+    # ---- long replies follow the typing and can be scrolled; the bubble hides itself after she finishes talking
+
+    LONG = " ".join(f"w{n:03d}" for n in range(120))  # a reply much longer than the bubble
+
+    def finish_typing(self, win):
+        win._shown = win._target
+        win._render_bubble()
+
+    def inside_bubble(self, win, dy=20):
+        left, top, right, _bottom = win._bubble_box
+        return SimpleNamespace(x=(left + right) // 2, y=top + dy, delta=120)
+
+    def test_a_long_reply_is_shown_in_full_not_cut_off_with_an_ellipsis(self):
+        from babyai.ui.app import MAX_LINES
+
+        win = self.window()
+        win._set_reply(self.LONG)
+        self.finish_typing(win)
+        text = self.bubble_text(win)
+        self.assertIn("w119", text)
+        self.assertNotIn("…", text)
+        self.assertNotIn("w000", text)  # the start has scrolled out of view ...
+        top, total, visible = win._view
+        self.assertEqual(visible, MAX_LINES)
+        self.assertEqual(top, total - visible)  # ... and she is showing the end of it
+
+    def test_the_view_follows_the_line_being_typed(self):
+        from babyai.ui.app import NEON
+
+        win = self.window()
+        win._set_reply(self.LONG)
+        for fraction in (0.1, 0.3, 0.55, 0.8, 0.97):
+            win._shown = int(win._target * fraction)
+            win._render_bubble()
+            _left, top, _right, bottom = win._bubble_box
+            cursor = [i for i in win.canvas.find_withtag("bubble") if win.canvas.type(i) == "rectangle" and win.canvas.itemcget(i, "fill") == NEON]
+            self.assertEqual(len(cursor), 1, fraction)
+            y1, y2 = win.canvas.bbox(cursor[0])[1], win.canvas.bbox(cursor[0])[3]
+            self.assertTrue(top <= y1 and y2 <= bottom, f"the typing cursor left the bubble at {fraction}")
+
+    def test_the_wheel_scrolls_a_long_reply_and_scrolling_down_follows_again(self):
+        win = self.window()
+        win._set_reply(self.LONG)
+        self.finish_typing(win)
+        end = win._view[0]
+        win._on_wheel(self.inside_bubble(win))  # delta > 0: towards the start
+        self.assertEqual(win._view[0], end - 1)
+        self.assertEqual(win._scroll, end - 1)
+        for _ in range(end + 5):
+            win._on_wheel(self.inside_bubble(win))
+        self.assertEqual(win._view[0], 0)  # stops at the start
+        self.assertIn("w000", self.bubble_text(win))
+        self.assertIn("CAPRI:", self.bubble_text(win))
+        for _ in range(end + 5):
+            win._on_wheel(SimpleNamespace(**{**vars(self.inside_bubble(win)), "delta": -120}))
+        self.assertEqual(win._view[0], end)  # stops at the end ...
+        self.assertIsNone(win._scroll)  # ... where it follows the typing again
+
+    def test_scrolled_up_there_are_arrows_for_what_is_off_screen(self):
+        win = self.window()
+        win._set_reply(self.LONG)
+        self.finish_typing(win)
+        count = lambda: len([i for i in win.canvas.find_withtag("bubble") if win.canvas.type(i) == "polygon"])
+        base = count()  # the bubble plate, plus the arrow towards the start
+        win._on_wheel(self.inside_bubble(win))
+        self.assertEqual(count(), base + 1)  # now text below as well
+        for _ in range(50):
+            win._on_wheel(self.inside_bubble(win))
+        self.assertEqual(count(), base)  # at the start: only the one towards the end
+
+    def test_the_wheel_away_from_the_bubble_does_nothing(self):
+        win = self.window()
+        win._set_reply(self.LONG)
+        self.finish_typing(win)
+        before = win._view
+        win._on_wheel(SimpleNamespace(x=2, y=2, delta=120))
+        self.assertEqual(win._view, before)
+        self.assertIsNone(win._scroll)
+
+    def test_a_new_reply_follows_the_typing_again(self):
+        win = self.window()
+        win._set_reply(self.LONG)
+        self.finish_typing(win)
+        win._on_wheel(self.inside_bubble(win))
+        self.assertIsNotNone(win._scroll)
+        win._set_reply(self.LONG)
+        self.assertIsNone(win._scroll)
+
+    def test_a_short_reply_does_not_scroll(self):
+        win = self.window()
+        win._set_reply("Short and sweet.")
+        self.finish_typing(win)
+        top, total, visible = win._view
+        self.assertEqual((top, total), (0, 1))
+        win._on_wheel(self.inside_bubble(win))
+        self.assertEqual(win._view[0], 0)
+
+    def talk_and_wait_for_hide(self, win, seconds=3.0):
+        win._set_reply("Hello there.")
+        self.pump(win, 3.0, until=lambda: win._shown >= win._target)
+        return self.pump(win, seconds, until=lambda: win._bubble_hidden)
+
+    def test_the_bubble_hides_itself_after_she_finishes_talking(self):
+        win = self.window(bubble_hide_s=0.5)
+        self.pump(win, 0.3)
+        started = time.monotonic()
+        self.assertTrue(self.talk_and_wait_for_hide(win))
+        self.assertGreaterEqual(time.monotonic() - started, 0.5)
+        self.assertEqual(win.canvas.find_withtag("bubble"), ())
+        self.assertIsNone(win._bubble_box)
+
+    def test_the_window_shape_gives_up_the_bubble_when_it_hides(self):
+        win = self.window(bubble_hide_s=0.5)
+        if win._shape is None:
+            self.skipTest("no X11 shape here")
+        self.pump(win, 0.3)
+        win._set_reply("Hello there.")
+        self.pump(win, 0.3)
+        left, top, right, bottom = win._bubble_box
+        middle = ((left + right) // 2, (top + bottom) // 2)
+        covers = lambda: any(x <= middle[0] < x + w and y <= middle[1] < y + h for x, y, w, h in win._shape.get_rects())
+        self.assertTrue(covers())
+        self.assertTrue(self.pump(win, 4.0, until=lambda: win._bubble_hidden))
+        self.pump(win, 0.2)
+        self.assertFalse(covers(), "the hidden bubble is still cut into the window")
+
+    def test_a_new_reply_brings_the_bubble_back(self):
+        win = self.window(bubble_hide_s=0.5)
+        self.assertTrue(self.talk_and_wait_for_hide(win))
+        win._set_reply("Back again.")
+        self.assertFalse(win._bubble_hidden)
+        self.assertTrue(win.canvas.find_withtag("bubble"))
+        self.assertIsNotNone(win._bubble_box)
+
+    def test_it_stays_while_she_is_thinking_or_being_typed_to(self):
+        win = self.window(bubble_hide_s=0.4)
+        hides = []
+        real = win._hide_bubble
+        win._hide_bubble = lambda: (hides.append(1), real())[1]
+        self.pump(win, 0.3)
+        win._busy = True
+        win._set_reply("", thinking=True)
+        self.pump(win, 1.5)
+        self.assertEqual(hides, [], "hid while she was still thinking")
+        win._busy = False
+        win._set_reply("Done.")
+        self.pump(win, 3.0, until=lambda: win._shown >= win._target)
+        hides.clear()  # (the bubble may rightly have hidden after "Done.")
+        win._toggle_input()  # you are typing
+        self.pump(win, 1.5)
+        self.assertEqual(hides, [], "hid while you were typing")
+
+    def test_resting_the_pointer_on_the_bubble_keeps_it_up(self):
+        win = self.window(bubble_hide_s=0.6)
+        self.pump(win, 0.3)
+        win._set_reply("Hello there.")
+        self.pump(win, 3.0, until=lambda: win._shown >= win._target)
+        left, top, right, bottom = win._bubble_box
+        spot = (win.root.winfo_rootx() + (left + right) // 2, win.root.winfo_rooty() + (top + bottom) // 2)
+        win.root.winfo_pointerxy = lambda: spot
+        self.pump(win, 2.0)
+        self.assertFalse(win._bubble_hidden, "hid with the pointer on it")
+        win.root.winfo_pointerxy = lambda: (1, 1)  # pointer moves away
+        self.assertTrue(self.pump(win, 4.0, until=lambda: win._bubble_hidden))
+
+    def test_scrolling_counts_as_looking_at_it(self):
+        win = self.window(bubble_hide_s=1.0)
+        win._set_reply(self.LONG)
+        self.finish_typing(win)
+        start = time.monotonic()
+        while time.monotonic() - start < 1.6:  # a wheel notch every 0.3 s keeps it up past the 1 s delay
+            win._on_wheel(self.inside_bubble(win))
+            self.pump(win, 0.3)
+        self.assertFalse(win._bubble_hidden)
+
+    def test_zero_never_hides_the_bubble(self):
+        win = self.window(bubble_hide_s=0)
+        win._set_reply("Hello there.")
+        self.pump(win, 3.0, until=lambda: win._shown >= win._target)
+        self.pump(win, 1.5)
+        self.assertFalse(win._bubble_hidden)
 
     # ---- typing on a desktop where the borderless window can't take keys (Wayland): the typing box
 
