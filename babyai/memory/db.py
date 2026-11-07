@@ -1,16 +1,46 @@
 import os
+import re
 import sqlite3
+import threading
 from typing import Any
+
+# Words that say nothing about *what* is being looked up ("what do I like on pizza?" -> pizza, like).
+STOPWORDS = frozenset(
+    "a an the and or of to in on at for with is are was were be do does did what whats which who how my me i you your "
+    "about that this it can could please tell know remember forget".split()
+)
+
+
+def fts_query(text: str, loose: bool) -> str | None:
+    """Turn what a person (or a model) typed into a safe FTS5 query, or None if there is nothing to look for.
+
+    Raw text breaks FTS5 on an apostrophe, question mark, hyphen or colon. Every word is quoted instead.
+    ``loose`` matches facts that contain any of the words (for recall); otherwise all of them (for forgetting)."""
+    words = re.findall(r"\w+", text.lower())
+    words = [w for w in words if w not in STOPWORDS] or words
+    if not words:
+        return None
+    return (" OR " if loose else " ").join(f'"{word}"' for word in words)
 
 
 class MemoryStore:
     def __init__(self, db_path: str = "~/.local/share/babyai/memory.db"):
         self.db_path = os.path.expanduser(db_path)
         os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
-        self.connection = sqlite3.connect(self.db_path)
-        self.connection.row_factory = sqlite3.Row
-        self.connection.execute("PRAGMA foreign_keys = ON")
+        self._local = threading.local()
         self._initialize_schema()
+
+    @property
+    def connection(self) -> sqlite3.Connection:
+        """This thread's connection. A sqlite3 connection can't be used from another thread, and the desktop
+        overlay asks the brain from a worker thread, so each thread opens its own (every write commits)."""
+        connection = getattr(self._local, "connection", None)
+        if connection is None:
+            connection = sqlite3.connect(self.db_path, timeout=10)
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            self._local.connection = connection
+        return connection
 
     def _initialize_schema(self) -> None:
         self.connection.execute(
@@ -90,7 +120,11 @@ class MemoryStore:
         self.connection.commit()
 
     def close(self) -> None:
-        self.connection.close()
+        """Close this thread's connection (other threads' connections close when those threads end)."""
+        connection = getattr(self._local, "connection", None)
+        if connection is not None:
+            connection.close()
+            self._local.connection = None
 
     def remember_fact(self, fact: str, source: str | None = None) -> dict[str, Any]:
         cursor = self.connection.execute(
@@ -101,6 +135,9 @@ class MemoryStore:
         return {"id": cursor.lastrowid, "fact": fact, "source": source}
 
     def recall_memory(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
+        match = fts_query(query, loose=True)
+        if match is None:
+            return []
         rows = self.connection.execute(
             """
             SELECT f.id, f.fact, f.source, f.created_at
@@ -111,7 +148,7 @@ class MemoryStore:
             ORDER BY f.id DESC
             LIMIT ?
             """,
-            (query, limit),
+            (match, limit),
         ).fetchall()
         return [dict(row) for row in rows]
 
@@ -121,9 +158,12 @@ class MemoryStore:
             self.connection.commit()
             return cursor.rowcount
         if query is not None:
+            match = fts_query(query, loose=False)  # every word must match: a vague request deletes nothing
+            if match is None:
+                return 0
             cursor = self.connection.execute(
                 "DELETE FROM facts WHERE id IN (SELECT rowid FROM facts_fts WHERE facts_fts MATCH ?)",
-                (query,),
+                (match,),
             )
             self.connection.commit()
             return cursor.rowcount
@@ -137,6 +177,9 @@ class MemoryStore:
         self.connection.commit()
 
     def search_conversations(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
+        match = fts_query(query, loose=True)
+        if match is None:
+            return []
         rows = self.connection.execute(
             """
             SELECT c.id, c.session_id, c.role, c.content, c.created_at
@@ -147,7 +190,7 @@ class MemoryStore:
             ORDER BY c.id DESC
             LIMIT ?
             """,
-            (query, limit),
+            (match, limit),
         ).fetchall()
         return [dict(row) for row in rows]
 

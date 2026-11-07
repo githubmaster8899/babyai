@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Mapping, Sequence
 
 THINK_AFTER_S = 15.0  # show the "THINKING… N s" counter once a reply takes this long
 SLEEP_AFTER_S = 600.0  # idle time before the figure falls asleep (0 turns auto-sleep off)
+BUBBLE_HIDE_S = 10.0  # the speech bubble hides this long after she has finished talking (0 keeps it up)
 WAKE_RADIUS_PX = 150.0  # a pointer that moves this close to the figure's head wakes it
 LOOK_RADIUS_PX = 250.0  # the eyes follow the pointer while it is within this distance of the head
 LOOK_REACH_PX = (6, 4)  # furthest the eyes slide from centre, sideways and up/down
@@ -93,6 +95,7 @@ class UiTimings:
     sleep_after_s: float = SLEEP_AFTER_S
     wake_radius_px: float = WAKE_RADIUS_PX
     look_radius_px: float = LOOK_RADIUS_PX
+    bubble_hide_s: float = BUBBLE_HIDE_S
 
 
 def timings_from_config(config: object) -> UiTimings:
@@ -106,8 +109,65 @@ def timings_from_config(config: object) -> UiTimings:
         return UiTimings()
     defaults = UiTimings()
     values = {}
-    for name in ("think_after_s", "sleep_after_s", "wake_radius_px", "look_radius_px"):
+    for name in ("think_after_s", "sleep_after_s", "wake_radius_px", "look_radius_px", "bubble_hide_s"):
         value = section.get(name)
         ok = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0
         values[name] = float(value) if ok else getattr(defaults, name)
     return UiTimings(**values)
+
+
+def needs_typing_box(setting: object, windowing: str, env: Mapping[str, str]) -> bool:
+    """Should typing go through the box? ``windowing`` is Tk's windowing system ("x11", "win32", "aqua")."""
+    choice = str(setting or "auto").strip().lower()
+    if choice in ("box", "popup"):
+        return True
+    if choice in ("bubble", "inline"):
+        return False
+    wayland = env.get("XDG_SESSION_TYPE", "").strip().lower() == "wayland" or bool(env.get("WAYLAND_DISPLAY"))
+    return windowing == "x11" and wayland
+
+
+def cursor_line(lengths: Sequence[int], shown: int) -> int:
+    """Index of the line being typed when ``shown`` letters of a reply are out. Each line counts its letters plus
+    one for the break after it (the same count the reveal uses), and the last line once everything is out."""
+    start = 0
+    for index, length in enumerate(lengths):
+        if shown < start + length + 1:
+            return index
+        start += length + 1
+    return max(0, len(lengths) - 1)
+
+
+def scroll_top(total: int, visible: int, cursor: int, user_top: int | None = None) -> int:
+    """First line to show when a reply of ``total`` lines is shown ``visible`` lines at a time.
+
+    By default the view follows the line being typed (``cursor``), so the newest text is always on screen. Once the
+    reader has scrolled (``user_top``) it stays where they put it. Always within the reply."""
+    last = max(0, total - visible)
+    if user_top is not None:
+        return min(max(0, user_top), last)
+    return min(max(0, cursor - visible + 1), last)
+
+
+class BubbleTimer:
+    """Says when the speech bubble should go away: ``after_s`` seconds after she has finished talking.
+
+    Time is passed in, never read here. It does not run while she is busy (thinking, typing out a reply, being typed to,
+    asking something) or after the bubble is already hidden, and ``touch`` (the reader hovering or scrolling) starts it over."""
+
+    def __init__(self, after_s: float) -> None:
+        self._after = after_s
+        self._due: float | None = None
+
+    def touch(self) -> None:
+        self._due = None
+
+    def update(self, now: float, busy: bool, hidden: bool) -> bool:
+        """Call every tick; True when the bubble should be hidden now."""
+        if self._after <= 0 or busy or hidden:
+            self._due = None
+            return False
+        if self._due is None:
+            self._due = now + self._after
+            return False
+        return now >= self._due
