@@ -3,7 +3,7 @@ import os
 import tempfile
 import unittest
 
-from babyai.agent.core import BabyAI
+from babyai.agent.core import BabyAI, text_tool_call
 from babyai.tools.registry import build_default_registry
 
 
@@ -152,6 +152,85 @@ class BrainTests(unittest.TestCase):
         self.ai.process_user_input("go")
         tool_messages = [m for m in self.ai.llm_client.calls[1]["messages"] if m["role"] == "tool"]
         self.assertEqual(len(tool_messages), 4)
+
+
+class TextToolCallTests(unittest.TestCase):
+    """A model that writes its tool call out as text instead of using tool_calls (llama3.1:8b does this)."""
+
+    setUp, tearDown, target = BrainTests.setUp, BrainTests.tearDown, BrainTests.target
+
+    def written(self, text, then="Yep, I can code."):
+        return ScriptedLLM(say(text), say(then))
+
+    def test_a_call_written_as_text_runs_the_tool_and_the_model_narrates(self):
+        self.ai.llm_client = self.written('{"name":"ask_user","parameters":{"question":"Can you code?"}}')
+        self.assertEqual(self.ai.process_user_input("Can you code?"), "Yep, I can code.")
+        second = self.ai.llm_client.calls[1]["messages"]
+        self.assertEqual(second[-1]["role"], "tool")
+        self.assertIn("Can you code?", second[-1]["content"])
+        self.assertEqual(second[-2]["tool_calls"][0]["function"]["name"], "ask_user")
+        self.assertEqual(second[-2]["content"], "")  # the JSON is not kept as something she said
+        self.assertNotIn("parameters", str(self.ai.context.history))
+
+    def test_a_slightly_broken_call_is_still_understood(self):
+        self.ai.llm_client = self.written('{"name":"ask_user",""parameters":{"question":"Can you code?"}}')
+        self.assertEqual(self.ai.process_user_input("Can you code?"), "Yep, I can code.")
+        self.assertIn("Can you code?", self.ai.llm_client.calls[1]["messages"][-1]["content"])
+
+    def test_a_code_fenced_call_with_arguments_is_understood(self):
+        with open(self.target("a.txt"), "w") as handle:
+            handle.write("needle")
+        text = '```json\n{"name": "read_file", "arguments": {"path": %s}}\n```' % json.dumps(self.target("a.txt"))
+        self.ai.llm_client = self.written(text, "It says needle.")
+        self.assertEqual(self.ai.process_user_input("read a.txt"), "It says needle.")
+        self.assertIn("needle", self.ai.llm_client.calls[1]["messages"][-1]["content"])
+
+    def test_a_call_written_as_text_still_goes_through_the_safety_gate(self):
+        text = json.dumps({"name": "write_file", "parameters": {"path": self.target(), "content": "x"}})
+        self.ai.llm_client = self.written(text, "Okay, I left it alone.")
+        self.ai.process_user_input("write a note")
+        self.assertFalse(os.path.exists(self.target()))  # strict level, nobody to ask: declined
+        self.assertIn("declined", self.ai.llm_client.calls[1]["messages"][-1]["content"])
+
+    def test_a_tool_that_does_not_exist_is_reported_to_the_model_not_shown(self):
+        self.ai.llm_client = self.written('{"name":"fly_to_the_moon","parameters":{}}', "I can't do that one.")
+        self.assertEqual(self.ai.process_user_input("fly"), "I can't do that one.")
+        self.assertIn("no tool called", self.ai.llm_client.calls[1]["messages"][-1]["content"])
+
+    def test_if_the_model_keeps_writing_calls_she_shows_what_the_tool_said_not_json(self):
+        self.ai.llm_client = ScriptedLLM(
+            say('{"name":"ask_user","parameters":{"question":"Can you code?"}}'),
+            say('{"name":"ask_user","parameters":{"question":"Again?"}}'),
+        )
+        reply = self.ai.process_user_input("Can you code?")
+        self.assertTrue(reply.startswith("ask_user:"))
+        self.assertNotIn("parameters", reply)
+
+    def test_prose_that_merely_contains_json_is_left_alone(self):
+        text = 'Sure! Here is {"name": "x", "parameters": {}} as asked.'
+        self.ai.llm_client = ScriptedLLM(say(text))
+        self.assertEqual(self.ai.process_user_input("show me json"), text)
+        self.assertEqual(len(self.ai.llm_client.calls), 1)
+
+    def test_nothing_is_parsed_when_the_model_cannot_use_tools(self):
+        self.ai._tools_ok = False
+        text = '{"name":"ask_user","parameters":{"question":"hi"}}'
+        self.ai.llm_client = ScriptedLLM(say(text))
+        self.assertEqual(self.ai.process_user_input("hi"), text)
+
+
+class TextToolCallParserTests(unittest.TestCase):
+    def test_shapes_it_accepts(self):
+        self.assertEqual(text_tool_call('{"name":"a","parameters":{"x":1}}'), ("a", {"x": 1}))
+        self.assertEqual(text_tool_call('  {"name": "a", "arguments": {}}\n'), ("a", {}))
+        self.assertEqual(text_tool_call('```\n{"name":"a","args":{"x":"}"}}\n```'), ("a", {"x": "}"}))
+        self.assertEqual(text_tool_call('{"name":"a",""parameters":{"x":1}}'), ("a", {"x": 1}))
+        self.assertEqual(text_tool_call('{"name":"a","parameters":{"x":1}'), ("a", {"x": 1}))  # a missing last brace
+
+    def test_shapes_it_refuses(self):
+        for text in ("hello", "", None, 5, '{"name":"a"}', '{"name":"a","parameters":{}} and more words',
+                     'Sure {"name":"a","parameters":{}}', '{"name":"a","parameters":{"x":1'):
+            self.assertIsNone(text_tool_call(text), text)
 
 
 class OfflineAndMemoryTests(unittest.TestCase):

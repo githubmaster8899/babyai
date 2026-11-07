@@ -1,4 +1,5 @@
 import json
+import re
 import sys
 from typing import Any, Callable
 
@@ -15,6 +16,31 @@ ConfirmHook = Callable[[str, dict[str, Any], dict[str, Any]], bool]
 
 MAX_TOOL_CALLS = 4  # tool calls honoured per user message
 MAX_TOOL_OUTPUT = 4000  # characters of a tool result handed back to the model
+
+# Small models often write a tool call out as text - {"name": "ask_user", "parameters": {...}} - instead of using the
+# tool_calls field, and a slightly broken one (a stray quote, say) isn't converted by the server either.
+_TEXT_CALL = re.compile(r'^\s*(?:```(?:json)?\s*)?\{\s*"name"\s*:\s*"(?P<name>[\w.\-]+)"', re.DOTALL)
+_TEXT_ARGS = re.compile(r'"(?:parameters|arguments|args)"\s*:\s*(?=\{)')
+
+
+def text_tool_call(content: Any) -> tuple[str, dict[str, Any]] | None:
+    """(tool name, arguments) if the whole of ``content`` is a tool call written as text, else None.
+
+    Only a reply that is nothing but the call counts: prose with some JSON in it is left alone."""
+    if not isinstance(content, str):
+        return None
+    match = _TEXT_CALL.match(content)
+    found = _TEXT_ARGS.search(content, match.end()) if match else None
+    if match is None or found is None:
+        return None
+    try:
+        args, end = json.JSONDecoder().raw_decode(content, found.end())
+    except ValueError:  # the arguments are broken: still a (bad) call, and the tool will say so
+        args, end = {}, found.end()
+    rest = content[end:].strip().strip("`").strip()
+    if rest.strip("} \n\t") or not content.rstrip().rstrip("`").rstrip().endswith("}"):
+        return None
+    return match.group("name"), args if isinstance(args, dict) else {}
 
 
 class BabyAI:
@@ -88,6 +114,10 @@ class BabyAI:
 
         message = result.get("choices", [{}])[0].get("message", {})
         tool_calls = message.get("tool_calls") or []
+        written = None if tool_calls or not self._tools_ok else text_tool_call(message.get("content"))
+        if written:  # a call written as text: treat it as the call it is, and never show the JSON
+            tool_calls = [{"id": "call_text", "function": {"name": written[0], "arguments": json.dumps(written[1])}}]
+            message = {**message, "content": ""}
 
         if tool_calls:
             calls = []
@@ -95,6 +125,8 @@ class BabyAI:
                 name, args = self._parse_call(call)
                 calls.append((call.get("id") or f"call_{index}", name, args, self._run_tool(name, args)))
             assistant_reply = self._narrate(messages, message, calls)
+            if text_tool_call(assistant_reply):  # still calling tools instead of talking: show what they said
+                assistant_reply = ""
             if not assistant_reply:  # no follow-up from the model: show what the tools said
                 assistant_reply = "\n".join(f"{name}: {text}" for _id, name, _args, text in calls)
             self.context.add_assistant_message(assistant_reply)
