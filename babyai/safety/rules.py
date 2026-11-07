@@ -35,6 +35,32 @@ TOOL_RISK_LEVELS = {
 }
 
 
+# The self-upgrade tools (babyai/tools/upgrade.py) take an ``action``, and what it does decides how risky the call is.
+# Anything that changes him or his machine is the user's call whatever the safety level (see SafetyGate.check);
+# looking, and working on a branch that is not live, is not.
+UPGRADE_ACTION_RISK: dict[str, dict[str, RiskLevel]] = {
+    "upgrade_code": {
+        "status": RiskLevel.LOW, "start": RiskLevel.LOW, "write": RiskLevel.LOW, "replace": RiskLevel.LOW,
+        "diff": RiskLevel.LOW, "discard": RiskLevel.LOW,
+        "test": RiskLevel.HIGH,  # runs the code he has just written
+        "apply": RiskLevel.HIGH,  # makes it live
+    },
+    "upgrade_version": {
+        "check": RiskLevel.LOW,
+        "update": RiskLevel.HIGH, "rollback": RiskLevel.HIGH, "restart": RiskLevel.HIGH,
+    },
+    "upgrade_model": {
+        "list": RiskLevel.LOW,
+        "pull": RiskLevel.HIGH, "switch": RiskLevel.HIGH,
+    },
+    "upgrade_notes": {
+        "show": RiskLevel.LOW, "show_skill": RiskLevel.LOW,
+        "add_note": RiskLevel.MEDIUM, "remove_note": RiskLevel.MEDIUM,
+        "save_skill": RiskLevel.MEDIUM, "delete_skill": RiskLevel.MEDIUM,
+    },
+}
+
+
 DANGEROUS_PATTERNS = (
     "rm -rf /",
     "rm -rf /tmp",
@@ -69,6 +95,8 @@ def get_risk_level(tool_name: str, arguments: dict | None = None) -> RiskLevel:
             return RiskLevel.CRITICAL
         if "curl" in command or "wget" in command:
             return RiskLevel.HIGH
+    if tool_name in UPGRADE_ACTION_RISK:
+        return UPGRADE_ACTION_RISK[tool_name].get(str(args.get("action", "")).strip().lower(), RiskLevel.HIGH)
     if tool_name == "capture_screen":
         return RiskLevel.CRITICAL
     if tool_name in {"get_clipboard", "set_clipboard"}:

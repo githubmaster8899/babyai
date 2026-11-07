@@ -1,5 +1,6 @@
 """A tiny stand-in for Ollama's OpenAI-compatible API, behaving the way Ollama documents it:
-GET /v1/models lists models; POST /v1/chat/completions answers 404 for a model it doesn't have
+GET /v1/models lists models; GET /api/tags lists them the native way (with capabilities); POST /api/pull
+"downloads" a model that is in ``pullable``; POST /v1/chat/completions answers 404 for a model it doesn't have
 ('model "x" not found, try pulling it first') and 400 for a model that can't use tools
 ('... does not support tools'). Not Ollama itself - there is none in the test environment."""
 
@@ -10,10 +11,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 class FakeOllama:
-    def __init__(self, models=("llama3.1:8b",), no_tools=(), delay=0.0, script=None):
+    def __init__(self, models=("llama3.1:8b",), no_tools=(), delay=0.0, script=None, pullable=()):
         self.models, self.no_tools, self.delay = list(models), set(no_tools), delay
+        self.pullable = set(pullable)
         self.script = list(script or [])  # chat responses to give, in order; then a default "pong"
         self.requests: list[dict] = []
+        self.pulls: list[str] = []  # models asked for through /api/pull
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -31,11 +34,23 @@ class FakeOllama:
             def do_GET(self):
                 if self.path == "/v1/models":
                     self._send(200, {"object": "list", "data": [{"id": m, "object": "model"} for m in outer.models]})
+                elif self.path == "/api/tags":
+                    self._send(200, {"models": [
+                        {"name": m, "size": 4_900_000_000, "capabilities": ["completion"] if m in outer.no_tools else ["completion", "tools"]}
+                        for m in outer.models
+                    ]})
                 else:
                     self._send(404, {"error": "not found"})
 
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+                if self.path == "/api/pull":
+                    outer.pulls.append(str(body.get("model")))
+                    if body.get("model") in outer.pullable:
+                        outer.models.append(body["model"])
+                        outer.pullable.discard(body["model"])
+                        return self._send(200, {"status": "success"})
+                    return self._send(404, {"error": "pull model manifest: file does not exist"})
                 outer.requests.append(body)
                 time.sleep(outer.delay)
                 model = body.get("model")

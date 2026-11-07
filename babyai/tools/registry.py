@@ -15,6 +15,7 @@ from babyai.tools.interaction import AskUserTool, NotifyTool
 from babyai.tools.memory import ForgetMemoryTool, RecallMemoryTool, RememberFactTool
 from babyai.tools.shell import RunShellTool
 from babyai.tools.system import GetSystemInfoTool, ManageProcessesTool
+from babyai.tools.upgrade import UpgradeCodeTool, UpgradeModelTool, UpgradeNotesTool, UpgradeVersionTool
 from babyai.tools.voice import CaptureScreenTool, GetClipboardTool, ListenTool, SetClipboardTool, SpeakTool
 from babyai.tools.web import FetchURLTool, WebSearchTool
 
@@ -41,7 +42,7 @@ class ToolRegistry:
         return tool.invoke(**(arguments or {}))
 
 
-def build_default_registry(memory_store=None, config: dict[str, Any] | None = None) -> ToolRegistry:
+def build_default_registry(memory_store=None, config: dict[str, Any] | None = None, upgrade: Any = None) -> ToolRegistry:
     registry = ToolRegistry()
     tools = [
         ReadFileTool(memory_store, config),
@@ -66,6 +67,9 @@ def build_default_registry(memory_store=None, config: dict[str, Any] | None = No
         GetClipboardTool(memory_store, config),
         SetClipboardTool(memory_store, config),
     ]
+    if upgrade is not None:  # he may upgrade himself (babyai/upgrade); off unless the assistant sets it up
+        tools += [UpgradeCodeTool(memory_store, config, upgrade), UpgradeVersionTool(memory_store, config, upgrade),
+                  UpgradeModelTool(memory_store, config, upgrade), UpgradeNotesTool(memory_store, config, upgrade)]
     for tool in tools:
         registry.register(tool)
     return registry

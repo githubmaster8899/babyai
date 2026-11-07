@@ -64,7 +64,7 @@ class BrainTests(unittest.TestCase):
         self.dir = tempfile.TemporaryDirectory()
         config = os.path.join(self.dir.name, "config.toml")
         with open(config, "w") as handle:
-            handle.write(f'[memory]\ndb_path = "{self.dir.name}/mem.db"\n[safety]\nlevel = "strict"\n')
+            handle.write(f'[memory]\ndb_path = "{self.dir.name}/mem.db"\n[upgrade]\ndir = "{self.dir.name}/self"\n[safety]\nlevel = "strict"\n')
         self.ai = BabyAI(config_path=config)
 
     def tearDown(self):
@@ -238,7 +238,7 @@ class OfflineAndMemoryTests(unittest.TestCase):
         self.dir = tempfile.TemporaryDirectory()
         config = os.path.join(self.dir.name, "config.toml")
         with open(config, "w") as handle:
-            handle.write(f'[memory]\ndb_path = "{self.dir.name}/mem.db"\n')
+            handle.write(f'[memory]\ndb_path = "{self.dir.name}/mem.db"\n[upgrade]\ndir = "{self.dir.name}/self"\n')
         self.ai = BabyAI(config_path=config)
 
     def tearDown(self):
