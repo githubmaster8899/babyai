@@ -13,7 +13,7 @@ def assistant(url, model="llama3.1:8b", character=True, timeout=None):
     config = os.path.join(tmp.name, "config.toml")
     extra = f"timeout = {timeout}\n" if timeout else ""
     with open(config, "w") as handle:
-        handle.write(f'[llm]\nbase_url = "{url}"\nmodel = "{model}"\n{extra}[memory]\ndb_path = "{tmp.name}/m.db"\n')
+        handle.write(f'[llm]\nbase_url = "{url}"\nmodel = "{model}"\n{extra}[memory]\ndb_path = "{tmp.name}/m.db"\n[upgrade]\ndir = "{tmp.name}/self"\n')
     ai = BabyAI(config_path=config)
     ai._tmp = tmp
     if character:

@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import sys
 from typing import Any, Callable
@@ -9,12 +10,15 @@ from babyai.llm.client import LLMClient
 from babyai.memory.store import MemoryStore
 from babyai.safety.gate import SafetyGate
 from babyai.tools.registry import build_default_registry
+from babyai.upgrade import UpgradeContext
 
 
 # Asked when the safety gate wants the user's say-so: (tool name, arguments, gate verdict) -> allowed?
 ConfirmHook = Callable[[str, dict[str, Any], dict[str, Any]], bool]
 
-MAX_TOOL_CALLS = 4  # tool calls honoured per user message
+MAX_TOOL_CALLS = 4  # tool calls honoured per round
+MAX_ROUNDS = 6  # model <-> tools round trips per message - but only while he is working on himself (upgrade_* tools); otherwise one
+MAX_TOOL_CALLS_TOTAL = 12  # tool calls across all rounds of one message
 MAX_TOOL_OUTPUT = 4000  # characters of a tool result handed back to the model
 
 # Small models often write a tool call out as text - {"name": "ask_user", "parameters": {...}} - instead of using the
@@ -45,6 +49,7 @@ def text_tool_call(content: Any) -> tuple[str, dict[str, Any]] | None:
 
 class BabyAI:
     def __init__(self, config_path: str = "config.toml", voice_enabled: bool = False):
+        self.config_path = os.path.abspath(os.path.expanduser(config_path))
         self.config = load_config(config_path)
         self.voice_enabled = voice_enabled or bool(self.config.get("voice", {}).get("enabled", False))
 
@@ -52,7 +57,12 @@ class BabyAI:
         self.memory = MemoryStore(memory_path)
         self.safety_gate = SafetyGate(level=self.config.get("safety", {}).get("level", "strict"))
         self.context = ConversationContext(self.config.get("agent", {}).get("system_prompt", DEFAULT_SYSTEM_PROMPT))
-        self.tool_registry = build_default_registry(memory_store=self.memory, config=self.config)
+        # He can upgrade himself (change his code on a branch, update, switch model, keep notes), every change approved by the
+        # user. [upgrade] enabled = false turns it off.
+        self.upgrade = UpgradeContext(self, self.config, self.config_path) if self.config.get("upgrade", {}).get("enabled", True) else None
+        self.tool_registry = build_default_registry(memory_store=self.memory, config=self.config, upgrade=self.upgrade)
+        if self.upgrade is not None:
+            self.context.extra_system = self.upgrade.notes.prompt_block
 
         # Set by the front end (CLI prompt, desktop bubble). Without one, anything the
         # safety gate wants confirmed is declined rather than silently run.
@@ -120,15 +130,7 @@ class BabyAI:
             message = {**message, "content": ""}
 
         if tool_calls:
-            calls = []
-            for index, call in enumerate(tool_calls[:MAX_TOOL_CALLS]):
-                name, args = self._parse_call(call)
-                calls.append((call.get("id") or f"call_{index}", name, args, self._run_tool(name, args)))
-            assistant_reply = self._narrate(messages, message, calls)
-            if text_tool_call(assistant_reply):  # still calling tools instead of talking: show what they said
-                assistant_reply = ""
-            if not assistant_reply:  # no follow-up from the model: show what the tools said
-                assistant_reply = "\n".join(f"{name}: {text}" for _id, name, _args, text in calls)
+            assistant_reply = self._run_rounds(messages, message, tool_calls)
             self.context.add_assistant_message(assistant_reply)
             return assistant_reply
 
@@ -188,7 +190,7 @@ class BabyAI:
         if not verdict["allowed"]:
             if not verdict["needs_confirmation"]:
                 return f"Blocked by the safety gate: {verdict['reason']}."
-            approved = self._ask_confirmation(name, args, verdict)
+            approved = self._ask_confirmation(name, self._preview(name, args), verdict)
             self.safety_gate.record_confirmation(name, args, approved)
             if not approved:
                 return f"The user declined to let {name} run."
@@ -204,6 +206,15 @@ class BabyAI:
             text = str(getattr(result, "content", result))
         return text[:MAX_TOOL_OUTPUT]
 
+    def _preview(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        """The arguments as the confirmation prompt shows them: the tool's own summary if it has one."""
+        tool = self.tool_registry.get(name)
+        try:
+            shown = tool.preview(**args) if tool is not None else None
+        except Exception:
+            shown = None
+        return shown if isinstance(shown, dict) and shown else args
+
     def _ask_confirmation(self, name: str, args: dict[str, Any], verdict: dict[str, Any]) -> bool:
         if self.confirm is None:
             return False
@@ -212,9 +223,42 @@ class BabyAI:
         except Exception:
             return False
 
-    def _narrate(self, messages: list[dict[str, Any]], message: dict[str, Any], calls: list[tuple]) -> str:
-        """Second model pass: hand the tool results back so the reply is in the assistant's own voice."""
-        followup = list(messages)
+    def _run_rounds(self, messages: list[dict[str, Any]], message: dict[str, Any], tool_calls: list[dict[str, Any]]) -> str:
+        """Run the model's tool calls, hand the results back, and return what she says about them.
+
+        Normally that is one round: the follow-up is plain talk. While he is working on himself (upgrade_* tools)
+        the follow-up may call more tools - a change takes several steps - up to MAX_ROUNDS."""
+        conversation, all_calls = list(messages), []
+        for round_number in range(MAX_ROUNDS):
+            calls = []
+            for index, call in enumerate(tool_calls[:MAX_TOOL_CALLS]):
+                if len(all_calls) + len(calls) >= MAX_TOOL_CALLS_TOTAL:
+                    break
+                name, args = self._parse_call(call)
+                calls.append((call.get("id") or f"call_{round_number}_{index}", name, args, self._run_tool(name, args)))
+            all_calls += calls
+            working = any(name.startswith("upgrade_") for _id, name, _args, _text in all_calls)
+            more = working and self._tools_ok and round_number + 1 < MAX_ROUNDS and len(all_calls) < MAX_TOOL_CALLS_TOTAL
+            conversation, reply = self._followup(conversation, message, calls, self.tool_registry.get_openai_tools() if more else None)
+            tool_calls = reply.get("tool_calls") or []
+            written = None if tool_calls or not more else text_tool_call(reply.get("content"))
+            if written:
+                tool_calls = [{"id": "call_text", "function": {"name": written[0], "arguments": json.dumps(written[1])}}]
+                reply = {**reply, "content": ""}
+            if not (more and tool_calls):
+                text = str(reply.get("content") or "").strip()
+                if text_tool_call(text):  # still calling tools instead of talking
+                    text = ""
+                break
+            message = reply
+        else:
+            text = ""
+        # no follow-up from the model: show what the tools said
+        return text or "\n".join(f"{name}: {result}" for _id, name, _args, result in all_calls)
+
+    def _followup(self, conversation: list[dict[str, Any]], message: dict[str, Any], calls: list[tuple], tools: list[dict[str, Any]] | None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Hand the tool results back to the model. (the conversation so far including them, the model's reply message)"""
+        followup = list(conversation)
         followup.append({
             "role": "assistant",
             "content": message.get("content") or "",
@@ -226,11 +270,10 @@ class BabyAI:
         for call_id, _name, _args, text in calls:
             followup.append({"role": "tool", "tool_call_id": call_id, "content": text})
         try:
-            result = self.llm_client.complete(messages=followup, tools=None, stream=False)
-            reply = result.get("choices", [{}])[0].get("message", {})
+            result = self.llm_client.complete(messages=followup, tools=tools, stream=False)
+            return followup, result.get("choices", [{}])[0].get("message", {})
         except Exception:
-            return ""
-        return str(reply.get("content") or "").strip()
+            return followup, {}
 
     def _fallback_response(self, user_input: str) -> str:
         lowered = user_input.lower()

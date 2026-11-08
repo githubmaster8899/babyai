@@ -19,6 +19,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "name": "BabyAI",
         "system_prompt": "You are BabyAI, a local-first private assistant. Be concise and helpful.",
     },
+    "upgrade": {
+        "enabled": True,  # he can upgrade himself (code on a branch, updates, models, notes); every change needs your yes
+        "dir": "~/.local/share/babyai/self",  # his working branches, journal, notes and skills
+    },
     "memory": {
         "db_path": "~/.local/share/babyai/memory.db",
     },

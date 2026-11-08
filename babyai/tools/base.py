@@ -34,6 +34,11 @@ class Tool:
     def invoke(self, **kwargs: Any) -> ToolResult:
         raise NotImplementedError
 
+    def preview(self, **kwargs: Any) -> dict[str, Any] | None:
+        """What the user should see when asked whether this call may run, if more than the raw arguments
+        (for instance what a change would touch). Called with the same arguments as ``invoke``; must not change anything."""
+        return None
+
     def parameters(self) -> dict[str, Any]:
         """JSON-schema for the arguments, read from the signature of ``invoke``."""
         properties: dict[str, Any] = {}
