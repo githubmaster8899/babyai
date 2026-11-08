@@ -3,7 +3,7 @@ from babyai.tools.base import Tool, ToolResult
 
 class AskUserTool(Tool):
     name = "ask_user"
-    description = "Ask the user a clarifying question."
+    description = "Ask the user one clarifying question, only when a request is missing details you cannot guess. Never use it to answer or to chat."
 
     def invoke(self, question: str) -> ToolResult:
         return ToolResult(True, question, {"question": question})

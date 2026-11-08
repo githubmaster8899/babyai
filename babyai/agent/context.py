@@ -9,6 +9,7 @@ DEFAULT_SYSTEM_PROMPT = (
 class ConversationContext:
     def __init__(self, system_prompt: str = DEFAULT_SYSTEM_PROMPT):
         self.system_prompt = system_prompt
+        self.extra_system = None  # optional () -> str appended to the system prompt each turn (his own notes; see babyai/upgrade)
         self.history: list[dict[str, str]] = []
 
     def add_user_message(self, content: str) -> None:
@@ -18,7 +19,11 @@ class ConversationContext:
         self.history.append({"role": "assistant", "content": content})
 
     def build_messages(self) -> list[dict[str, str]]:
-        messages = [{"role": "system", "content": self.system_prompt}]
+        try:
+            extra = self.extra_system() if self.extra_system else ""
+        except Exception:
+            extra = ""
+        messages = [{"role": "system", "content": self.system_prompt + extra}]
         messages.extend(self.history)
         return messages
 

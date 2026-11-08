@@ -1,4 +1,5 @@
 import argparse
+import sys
 
 from babyai.agent.core import BabyAI
 
@@ -9,8 +10,18 @@ def main(argv=None):
     parser.add_argument("--voice", action="store_true", help="Enable voice mode if available")
     parser.add_argument("--no-voice", action="store_true", help="Disable voice mode")
     parser.add_argument("--desktop", action="store_true", help="Launch the floating desktop overlay (needs Tk)")
+    parser.add_argument("--capri", action="store_true", help="Optional: launch the separate C# Capri app built from capri/ and exit (not needed for --desktop, which has Capri built in); if it can't start, carry on as usual")
     parser.add_argument("command", nargs="?", help="Run a single text command instead of interactive mode")
     args = parser.parse_args(argv)
+
+    if args.capri:
+        from babyai.capri_launcher import launch_capri
+
+        result = launch_capri()
+        print(result.message)
+        if result.ok:
+            return 0
+        print("Continuing without Capri...")
 
     voice_enabled = bool(args.voice) and not bool(args.no_voice)
     assistant = BabyAI(config_path=args.config, voice_enabled=voice_enabled)
@@ -33,6 +44,8 @@ def main(argv=None):
         return 0
 
     if args.command:
+        if sys.stdin.isatty():  # someone is there to answer a "may I run this?" question
+            assistant.confirm = assistant.cli_confirm
         response = assistant.process_user_input(args.command)
         print(response)
         return 0

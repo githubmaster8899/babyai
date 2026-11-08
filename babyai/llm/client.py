@@ -4,6 +4,26 @@ import urllib.request
 from typing import Any
 
 
+class LLMRequestError(RuntimeError):
+    """The server answered, but with an error. ``detail`` is the server's own explanation, if it gave one
+    (Ollama says things like: model "x" not found, try pulling it first)."""
+
+    def __init__(self, message: str, status: int | None = None, detail: str = ""):
+        super().__init__(message)
+        self.status = status
+        self.detail = detail
+
+
+def _error_detail(body: str) -> str:
+    try:
+        error = json.loads(body).get("error", "")
+    except (json.JSONDecodeError, AttributeError):
+        return body.strip()[:200]
+    if isinstance(error, dict):
+        error = error.get("message", "")
+    return str(error).strip()[:200]
+
+
 class LLMClient:
     def __init__(self, base_url: str, model: str, api_key: str = "", timeout: int = 30):
         self.base_url = base_url.rstrip("/")
@@ -23,10 +43,7 @@ class LLMClient:
         request = urllib.request.Request(
             self.base_url + "/chat/completions",
             data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}" if self.api_key else "",
-            },
+            headers=self._headers(),
             method="POST",
         )
 
@@ -34,7 +51,13 @@ class LLMClient:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 body = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
-            raise RuntimeError(f"LLM request failed: {exc.code} {exc.reason}") from exc
+            try:
+                detail = _error_detail(exc.read().decode("utf-8", "replace"))
+            except Exception:
+                detail = ""
+            raise LLMRequestError(
+                f"LLM request failed: {exc.code} {exc.reason}" + (f": {detail}" if detail else ""), exc.code, detail
+            ) from exc
         except Exception as exc:
             raise RuntimeError(f"LLM request failed: {exc}") from exc
 
@@ -42,6 +65,22 @@ class LLMClient:
             return json.loads(body)
 
         return self._parse_stream_response(body)
+
+    def _headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+
+    def list_models(self, timeout: float = 5) -> list[str]:
+        """Names of the models the server offers (OpenAI-style GET /models; Ollama supports it), or []."""
+        request = urllib.request.Request(self.base_url + "/models", headers=self._headers(), method="GET")
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                data = json.loads(response.read().decode("utf-8")).get("data", [])
+        except Exception:
+            return []
+        return [str(item["id"]) for item in data if isinstance(item, dict) and item.get("id")]
 
     def _parse_stream_response(self, body: str) -> dict[str, Any]:
         events = []

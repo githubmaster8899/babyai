@@ -1,0 +1,34 @@
+BabyAI is licensed under the MIT License (see LICENSE), EXCEPT for the
+contents of the capri/ directory.
+
+capri/ is a copy of Capri (https://github.com/lachydotmcg/capri-desktop,
+imported from upstream commit 72d6b8374905689d8d49736079f322c9429bd52e).
+It is licensed under the PolyForm Noncommercial License 1.0.0 (see
+capri/LICENSE.md), not MIT. It may be used, changed and shared for
+noncommercial purposes only, and any copy you share must keep
+capri/LICENSE.md and the notice below.
+
+Required Notice: Copyright 2026 Lachy (https://github.com/lachydotmcg)
+
+Capri's body inside BabyAI (the desktop overlay)
+------------------------------------------------
+`python3 -m babyai --desktop` draws Capri's character using her sprites
+(capri/assets/sprites) and animation rules, driven by BabyAI's own brain. These
+files are ports of, or load, Capri's work and are therefore licensed under the
+PolyForm Noncommercial License 1.0.0 as well, not MIT:
+
+  babyai/ui/capri_body.py   (clip table, idle/blink/glitch/grin/sleep/wake rules,
+                             mouth shapes and typing pace, petting; ported from
+                             capri/cross/Pet.cs and capri/cross/Talk.cs, including
+                             her three pet lines)
+  babyai/ui/sprites.py      (loads and scales her sprite strips; it writes a scaled
+                             copy to ~/.cache/babyai/sprites, which is also
+                             noncommercial-only and is not part of this repository)
+
+babyai/ui/app.py and babyai/ui/persona.py are BabyAI's own (MIT), but the overlay
+is built to run with Capri's sprites: using or sharing BabyAI together with them is
+noncommercial only. Setting `[ui] character = "stick"` in config.toml draws a plain
+stick figure instead and uses none of Capri's art. The persona prompt in
+persona.py is written for BabyAI; it is not Capri's personality file.
+
+Required Notice: Copyright 2026 Lachy (https://github.com/lachydotmcg)
