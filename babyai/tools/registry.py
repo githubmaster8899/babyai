@@ -16,7 +16,7 @@ from babyai.tools.habits import HabitProfileTool
 from babyai.tools.memory import ForgetMemoryTool, RecallMemoryTool, RememberFactTool
 from babyai.tools.shell import RunShellTool
 from babyai.tools.system import GetSystemInfoTool, ManageProcessesTool
-from babyai.tools.upgrade import UpgradeCodeTool, UpgradeModelTool, UpgradeNotesTool, UpgradeVersionTool
+from babyai.tools.upgrade import UpgradeCodeTool, UpgradeIdeasTool, UpgradeModelTool, UpgradeNotesTool, UpgradeVersionTool
 from babyai.tools.voice import CaptureScreenTool, GetClipboardTool, ListenTool, SetClipboardTool, SpeakTool
 from babyai.tools.web import FetchURLTool, WebSearchTool
 
@@ -73,6 +73,8 @@ def build_default_registry(memory_store=None, config: dict[str, Any] | None = No
     if upgrade is not None:  # he may upgrade himself (babyai/upgrade); off unless the assistant sets it up
         tools += [UpgradeCodeTool(memory_store, config, upgrade), UpgradeVersionTool(memory_store, config, upgrade),
                   UpgradeModelTool(memory_store, config, upgrade), UpgradeNotesTool(memory_store, config, upgrade)]
+        if getattr(upgrade, "ideas", None) is not None:  # his own ideas for getting better (babyai/upgrade/ideas.py)
+            tools.append(UpgradeIdeasTool(memory_store, config, upgrade))
     for tool in tools:
         registry.register(tool)
     return registry

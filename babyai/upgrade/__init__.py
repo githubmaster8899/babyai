@@ -9,6 +9,7 @@ from typing import Any
 
 import babyai
 from babyai.upgrade.code import CodeUpgrades
+from babyai.upgrade.ideas import MIN_HOURS, Ideas
 from babyai.upgrade.models import ModelUpgrades
 from babyai.upgrade.notes import NoteBook
 from babyai.upgrade.update import VersionUpdates
@@ -28,3 +29,11 @@ class UpgradeContext:
         self.version = VersionUpdates(self.repo, self.state)
         self.models = ModelUpgrades(assistant, config_path)
         self.notes = NoteBook(self.state)
+        # His own ideas for getting better (babyai/upgrade/ideas.py): he only suggests. [ideas] enabled = false turns it off.
+        ideas = config.get("ideas", {})
+        self.ideas = Ideas(self.state, busy=self._working, min_hours=ideas.get("min_hours", MIN_HOURS), fetch_updates=ideas.get("check_updates", True)) if ideas.get("enabled", True) else None
+
+    def _working(self) -> bool:
+        """Is a change of his own in progress (a branch he has started and not applied or thrown away)?"""
+        proposal = self.code.journal.load()["proposal"]
+        return bool(proposal and Path(proposal["path"]).is_dir())

@@ -26,6 +26,9 @@ def main(argv=None):
     voice_enabled = bool(args.voice) and not bool(args.no_voice)
     assistant = BabyAI(config_path=args.config, voice_enabled=voice_enabled)
 
+    if args.desktop or not args.command:
+        assistant.start_idea_checks()  # in the background, at most once a day; never in a one-shot command
+
     if args.desktop:
         try:
             import tkinter

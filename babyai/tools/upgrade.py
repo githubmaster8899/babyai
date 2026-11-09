@@ -109,6 +109,28 @@ class UpgradeModelTool(_UpgradeTool):
         return None
 
 
+class UpgradeIdeasTool(_UpgradeTool):
+    name = "upgrade_ideas"
+    description = (
+        "Your own ideas for getting better. You only suggest: nothing changes until the user says yes, and they approve every step. "
+        "Actions: list - the ideas you have and what became of them; "
+        "suggest (kind, title, why) - note an idea you thought of yourself (kind: code, model, version or notes; keep it general, "
+        "no file paths, links or personal details), then tell the user about it in a sentence or two; "
+        "accept (idea) - the user said yes (this only records it: do the work with the other upgrade_ tools, which still ask); "
+        "dismiss (idea) - the user said no; pause / resume - stop or restart having ideas."
+    )
+
+    def invoke(self, action: str = "list", idea: int = 0, kind: str = "", title: str = "", why: str = "") -> ToolResult:
+        ideas = self.upgrade.ideas
+        return self._dispatch(action, {
+            "list": ideas.show, "suggest": lambda: ideas.suggest(kind, title, why), "accept": lambda: ideas.accept(idea),
+            "dismiss": lambda: ideas.dismiss(idea), "pause": ideas.pause, "resume": ideas.resume,
+        })
+
+    def preview(self, action: str = "", **_: Any) -> dict[str, Any] | None:
+        return self.upgrade.ideas.preview(action)
+
+
 class UpgradeNotesTool(_UpgradeTool):
     name = "upgrade_notes"
     description = (

@@ -54,6 +54,13 @@ class VersionUpdates:
         ahead, behind = git(repo, "rev-list", "--left-right", "--count", f"HEAD...{upstream}").split()
         return int(ahead), int(behind)
 
+    def quick_state(self) -> dict[str, object]:
+        """Fetch, and say where I stand against my upstream branch. Changes nothing but the fetched refs (no merge, no checkout)."""
+        repo = self._repo()
+        upstream = self._upstream(repo)
+        ahead, behind = self._fetch(repo, upstream)
+        return {"upstream": upstream, "tip": git(repo, "rev-parse", upstream), "ahead": ahead, "behind": behind}
+
     def check(self) -> str:
         repo = self._repo()
         upstream = self._upstream(repo)
