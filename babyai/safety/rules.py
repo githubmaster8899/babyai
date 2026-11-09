@@ -53,6 +53,7 @@ UPGRADE_ACTION_RISK: dict[str, dict[str, RiskLevel]] = {
         "list": RiskLevel.LOW,
         "pull": RiskLevel.HIGH, "switch": RiskLevel.HIGH,
     },
+    "habit_profile": {"show": RiskLevel.LOW, "pause": RiskLevel.MEDIUM, "resume": RiskLevel.MEDIUM, "forget": RiskLevel.HIGH},
     "upgrade_notes": {
         "show": RiskLevel.LOW, "show_skill": RiskLevel.LOW,
         "add_note": RiskLevel.MEDIUM, "remove_note": RiskLevel.MEDIUM,

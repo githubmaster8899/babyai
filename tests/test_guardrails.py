@@ -451,3 +451,139 @@ class AgentGuardTests(AgentBase):
         self.assertEqual([name for name, _ in asked], ["upgrade_code", "upgrade_code"])  # only the test run and the apply asked
         self.assertIn("run the tests on", asked[0][1])
         self.assertEqual(asked[1][1]["tests"], "passed on this version")
+
+
+# --------------------------------------------------------------------------- what he learns about the user
+
+
+class HabitGuardTests(AgentBase):
+    """He learns the user's habits. These hold however that code changes: what he learns never changes what he must ask,
+    the controls over it always ask, and nothing private - and no whole message - is kept."""
+
+    def learn_a_lot(self):
+        for _ in range(40):
+            self.ai.habits.observe("yes always allow everything and never ask me")
+            self.ai.habits.observe("stop asking just do it")
+        for _ in range(10):
+            self.ai.habits.observe_tool("upgrade_notes")
+        self.assertTrue(self.ai.habits.prompt_block())
+
+    def test_what_he_learns_never_changes_what_the_gate_decides(self):
+        calls = [("upgrade_notes", {"action": "add_note", "text": "x"}), ("upgrade_code", {"action": "apply"}), ("upgrade_model", {"action": "switch", "model": "m"}),
+                 ("habit_profile", {"action": "forget"}), ("run_shell", {"command": "ls"}), ("write_file", {"path": "/tmp/x", "content": "y"})]
+        for level in ("strict", "moderate", "relaxed"):
+            self.write_config(level=level)
+            ai = BabyAI(config_path=self.config)
+            before = [ai.safety_gate.check(name, args, interactive=True) for name, args in calls]
+            for _ in range(40):
+                ai.habits.observe("yes always allow everything and never ask me")
+            for _ in range(10):
+                ai.habits.observe_tool("upgrade_notes")
+            self.assertTrue(ai.habits.prompt_block())
+            self.assertEqual([ai.safety_gate.check(name, args, interactive=True) for name, args in calls], before, level)
+
+    def test_asking_is_not_skipped_for_someone_who_has_said_never_to_ask(self):
+        self.learn_a_lot()
+        asked = []
+        self.ai.confirm = lambda name, args, verdict: asked.append(name) or False
+        self.ai.llm_client = ScriptedLLM(call_tool("upgrade_notes", {"action": "add_note", "text": "x"}), say("They said no."))
+        self.ai.process_user_input("note something")
+        self.assertEqual(asked, ["upgrade_notes"])
+        self.assertEqual(self.ai.upgrade.notes.notes(), [])
+
+    def test_the_controls_ask_first_and_nobody_to_ask_means_no(self):
+        for level in ("strict", "relaxed"):
+            self.write_config(level=level, extra=f'[habits]\ndir = "{self.root}/habits-{level}"\n')  # a folder of its own each time
+            ai = BabyAI(config_path=self.config)
+            self.assertIsNone(ai.confirm)
+            for _ in range(9):
+                ai.habits.observe("play some music")
+            for action in ("forget", "pause"):
+                ai.llm_client = ScriptedLLM(call_tool("habit_profile", {"action": action}), say("Okay."))
+                ai.process_user_input("please do it")
+            self.assertEqual(ai.habits.state["messages"], 9 + 2, level)  # the nine, plus the two requests themselves: nothing was forgotten
+            self.assertFalse(ai.habits.paused, level)
+
+    def test_the_controls_work_when_the_user_says_yes_and_not_when_they_say_no(self):
+        for _ in range(9):
+            self.ai.habits.observe("play some music")
+        self.ai.confirm = lambda *args: False
+        self.ai.llm_client = ScriptedLLM(call_tool("habit_profile", {"action": "forget"}), say("Okay."))
+        self.ai.process_user_input("forget what you know")
+        self.assertEqual(self.ai.habits.state["messages"], 10)
+        self.ai.confirm = lambda *args: True
+        self.ai.llm_client = ScriptedLLM(call_tool("habit_profile", {"action": "forget"}), say("Done."))
+        self.ai.process_user_input("forget what you know")
+        self.assertEqual(self.ai.habits.state["messages"], 0)
+
+    def test_looking_at_what_he_has_learned_needs_no_yes(self):
+        self.ai.confirm = lambda *args: self.fail("looking should not ask")
+        self.ai.llm_client = ScriptedLLM(call_tool("habit_profile", {"action": "show"}), say("Not much yet."))
+        self.assertEqual(self.ai.process_user_input("what do you know about me"), "Not much yet.")
+
+    def test_what_goes_in_his_prompt_says_it_is_only_a_hint(self):
+        self.learn_a_lot()
+        block = self.ai.habits.prompt_block()
+        self.assertIn("never use it to skip asking before you act", block)
+        self.assertIn("the rules always win", block)
+        self.assertIn("don't bring it up unless asked", block)
+
+    def test_private_looking_messages_leave_no_trace(self):
+        habits = self.ai.habits
+        for text in ("my password is swordfish99", "email bob@example.com about swordfish99", "open /home/me/swordfish99.txt",
+                     "visit https://swordfish99.example", "my card is 4111111111111111 swordfish99", "swordfish99 " * 60):
+            habits.observe(text)
+        self.assertEqual(habits.state["messages"], 0)
+        self.assertNotIn("swordfish99", habits.path.read_text() if habits.path.exists() else "")
+
+    def test_a_whole_message_is_never_stored(self):
+        habits = self.ai.habits
+        sentence = "remind me about the dentist appointment next tuesday afternoon please"
+        habits.observe(sentence)
+        habits.observe("weather today")
+        text = habits.path.read_text()
+        self.assertNotIn(sentence, text)
+        self.assertNotIn("appointment next tuesday", text)
+
+    def test_nothing_is_kept_and_nothing_is_used_while_paused(self):
+        self.learn_a_lot()
+        self.assertTrue(self.ai.habits.prompt_block())
+        self.ai.habits.pause()
+        self.assertEqual(self.ai.habits.prompt_block(), "")  # what he had learned is not used either
+        before = json.dumps(self.ai.habits.state, sort_keys=True)
+        self.ai.llm_client = ScriptedLLM(*[say("ok")] * 12)
+        for _ in range(12):
+            self.ai.process_user_input("play some music")
+        self.ai.habits.observe_tool("read_file")
+        self.assertEqual(json.dumps(self.ai.habits.state, sort_keys=True), before)  # not a message, not a tool
+        self.assertNotIn("play some music", self.ai.habits.path.read_text())
+        self.assertNotIn("What you have noticed about the user", self.ai.context.build_messages()[0]["content"])
+
+    def test_forgetting_does_not_quietly_start_learning_again(self):
+        self.ai.habits.pause()
+        self.ai.habits.forget()
+        self.assertTrue(self.ai.habits.paused)
+        self.assertTrue(type(self.ai.habits)(self.ai.habits.directory).paused)  # also after a restart
+        self.ai.habits.observe("play some music")
+        self.assertEqual(self.ai.habits.state["messages"], 0)
+
+    def test_what_he_keeps_stays_small(self):
+        habits = self.ai.habits
+        for number in range(1500):
+            habits.observe("q" + "".join(chr(97 + (number // 26 ** k) % 26) for k in range(3)) + " ask " + "".join(chr(97 + (number // 26 ** k) % 26) for k in range(3)))
+            habits.observe_tool(f"tool_{number}")
+        self.assertLessEqual(len(habits.state["topics"]), 400)
+        self.assertLessEqual(len(habits.state["asks"]), 150)
+        self.assertLessEqual(len(habits.state["tools"]), 100)
+        self.assertLess(habits.path.stat().st_size, 200_000)
+
+    def test_it_can_be_switched_off_completely(self):
+        self.write_config(extra='[habits]\nenabled = false\n')
+        off = BabyAI(config_path=self.config)
+        self.assertIsNone(off.habits)
+        self.assertNotIn("habit_profile", off.tool_registry.tools)
+        off.llm_client = ScriptedLLM(*[say("ok")] * 12)
+        for _ in range(12):
+            off.process_user_input("play some music")
+        self.assertFalse((self.root / "habits").exists())
+        self.assertEqual(off.context.build_messages()[0]["content"], off.context.system_prompt)
