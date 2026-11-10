@@ -28,7 +28,7 @@ from tests.test_guardrails import UNITTEST, AgentBase, CodeBase, UpdateBase, sh
 class CodeUpgradeTests(CodeBase):
     def test_he_may_edit_his_own_upgrade_code_and_its_tests(self):
         folder = self.start()
-        for path in ("babyai/upgrade/code.py", "babyai/upgrade/new_helper.py", "babyai/tools/upgrade.py", "tests/test_upgrade.py"):
+        for path in ("babyai/upgrade/code.py", "babyai/upgrade/new_helper.py", "babyai/tools/upgrade.py", "tests/test_upgrade.py", "tests/test_ideas.py"):
             self.code.write(path, "x = 1\n")
             self.assertEqual((folder / path).read_text(), "x = 1\n", path)
         self.code.replace("babyai/upgrade/code.py", "x = 1", "x = 2")

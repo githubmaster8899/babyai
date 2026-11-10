@@ -23,6 +23,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "enabled": True,  # he can upgrade himself (code on a branch, updates, models, notes); every change needs your yes
         "dir": "~/.local/share/babyai/self",  # his working branches, journal, notes and skills
     },
+    "ideas": {
+        "enabled": True,  # he thinks about how to get better and suggests it (he only suggests: nothing changes until you say yes)
+        "min_hours": 24,  # at most one idea put to you per this many hours
+        "check_updates": True,  # once a day, when he starts, a read-only git fetch to see if a newer version exists
+    },
     "habits": {
         "enabled": True,  # he learns your habits (what you ask, when, how you like replies); counts only, you can see/pause/wipe them
         # "dir" is a habits folder next to the memory database unless you set it here

@@ -55,6 +55,7 @@ UPGRADE_CODE = (  # his own upgrade machinery: he may change it, and the user is
     "babyai/upgrade/",
     "babyai/tools/upgrade.py",
     "tests/test_upgrade.py",
+    "tests/test_ideas.py",
 )
 MAX_FILE_BYTES = 200_000
 MAX_FILES = 40

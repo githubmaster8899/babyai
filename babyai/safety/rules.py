@@ -53,6 +53,10 @@ UPGRADE_ACTION_RISK: dict[str, dict[str, RiskLevel]] = {
         "list": RiskLevel.LOW,
         "pull": RiskLevel.HIGH, "switch": RiskLevel.HIGH,
     },
+    "upgrade_ideas": {  # his own suggestions: they change nothing themselves (accepting only records the user's yes)
+        "list": RiskLevel.LOW, "suggest": RiskLevel.LOW, "accept": RiskLevel.LOW, "dismiss": RiskLevel.LOW,
+        "pause": RiskLevel.MEDIUM, "resume": RiskLevel.MEDIUM,
+    },
     "habit_profile": {"show": RiskLevel.LOW, "pause": RiskLevel.MEDIUM, "resume": RiskLevel.MEDIUM, "forget": RiskLevel.HIGH},
     "upgrade_notes": {
         "show": RiskLevel.LOW, "show_skill": RiskLevel.LOW,

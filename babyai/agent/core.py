@@ -2,6 +2,7 @@ import json
 import os
 import re
 import sys
+import threading
 from typing import Any, Callable
 
 from babyai.agent.context import ConversationContext, DEFAULT_SYSTEM_PROMPT
@@ -67,7 +68,15 @@ class BabyAI:
         habit_dir = habit_config.get("dir") or os.path.join(os.path.dirname(os.path.expanduser(memory_path)), "habits")
         self.habits = Habits(habit_dir) if habit_config.get("enabled", True) else None
         self.tool_registry = build_default_registry(memory_store=self.memory, config=self.config, upgrade=self.upgrade, habits=self.habits)
-        blocks = [block for block in (self.upgrade.notes.prompt_block if self.upgrade is not None else None, self.habits.prompt_block if self.habits is not None else None) if block]
+        # He thinks for himself about how to get better and suggests it - he only suggests (babyai/upgrade/ideas.py). [ideas] enabled = false turns it off.
+        self.ideas = self.upgrade.ideas if self.upgrade is not None else None
+        blocks = [
+            block for block in (
+                self.upgrade.notes.prompt_block if self.upgrade is not None else None,
+                self.ideas.prompt_block if self.ideas is not None else None,
+                self.habits.prompt_block if self.habits is not None else None,
+            ) if block
+        ]
         if blocks:
             self.context.extra_system = lambda: "".join(block() for block in blocks)
 
@@ -86,6 +95,19 @@ class BabyAI:
             timeout=llm_cfg.get("timeout", 120),
         )
         self._tools_ok = True  # flips off if the model says it can't use tools
+
+    def _noticed(self, what: str, *args: Any) -> None:
+        """Tell the ideas store about something he noticed. Noticing must never get in the way of an answer."""
+        if self.ideas is not None:
+            try:
+                getattr(self.ideas, what)(*args)
+            except Exception:
+                pass
+
+    def start_idea_checks(self) -> None:
+        """Front ends call this once at start-up: look for a newer version in the background (a read-only fetch, at most once a day)."""
+        if self.ideas is not None and self.upgrade is not None and self.ideas.check_due():
+            threading.Thread(target=self.ideas.check_updates, args=(self.upgrade.version,), daemon=True, name="babyai-idea-check").start()
 
     def cli_confirm(self, name: str, arguments: dict[str, Any], verdict: dict[str, Any]) -> bool:
         shown = ", ".join(f"{key}={str(value)[:80]!r}" for key, value in arguments.items()) or "no arguments"
@@ -118,6 +140,9 @@ class BabyAI:
                 self.habits.observe(user_input)
             except Exception:  # learning must never get in the way of an answer
                 pass
+        self._noticed("begin_turn")  # at most one idea he may mention in this message
+        if not self._tools_ok:
+            self._noticed("plain_turn")
         self.context.add_user_message(user_input)
         messages = self.context.build_messages()
         tool_schemas = self.tool_registry.get_openai_tools() if self._tools_ok else None
@@ -134,10 +159,12 @@ class BabyAI:
             self.context.add_assistant_message(fallback)
             return fallback
 
+        self._noticed("mark_shown")  # the model got the message, so whatever idea was put in front of it counts as raised
         message = result.get("choices", [{}])[0].get("message", {})
         tool_calls = message.get("tool_calls") or []
         written = None if tool_calls or not self._tools_ok else text_tool_call(message.get("content"))
         if written:  # a call written as text: treat it as the call it is, and never show the JSON
+            self._noticed("text_call")
             tool_calls = [{"id": "call_text", "function": {"name": written[0], "arguments": json.dumps(written[1])}}]
             message = {**message, "content": ""}
 
@@ -197,6 +224,7 @@ class BabyAI:
     def _run_tool(self, name: str, args: dict[str, Any]) -> str:
         """Run one tool call through the safety gate. Always returns text for the model; never raises."""
         if self.tool_registry.get(name) is None:
+            self._noticed("missing_tool", name)
             return f"There is no tool called {name!r}."
         verdict = self.safety_gate.check(name, args, interactive=True)
         if not verdict["allowed"]:
@@ -211,6 +239,7 @@ class BabyAI:
         except TypeError as exc:  # the model passed arguments the tool does not take
             return f"{name} was called with bad arguments: {exc}"
         except Exception as exc:
+            self._noticed("tool_crashed", name)
             return f"{name} failed: {exc}"
         if self.habits is not None:
             try:
@@ -260,6 +289,7 @@ class BabyAI:
             tool_calls = reply.get("tool_calls") or []
             written = None if tool_calls or not more else text_tool_call(reply.get("content"))
             if written:
+                self._noticed("text_call")
                 tool_calls = [{"id": "call_text", "function": {"name": written[0], "arguments": json.dumps(written[1])}}]
                 reply = {**reply, "content": ""}
             if not (more and tool_calls):
