@@ -7,6 +7,7 @@ from typing import Any, Callable
 from babyai.agent.context import ConversationContext, DEFAULT_SYSTEM_PROMPT
 from babyai.config.loader import load_config
 from babyai.llm.client import LLMClient
+from babyai.habits import Habits
 from babyai.memory.store import MemoryStore
 from babyai.safety.gate import SafetyGate
 from babyai.tools.registry import build_default_registry
@@ -60,9 +61,15 @@ class BabyAI:
         # He can upgrade himself (change his code on a branch, update, switch model, keep notes), every change approved by the
         # user. [upgrade] enabled = false turns it off.
         self.upgrade = UpgradeContext(self, self.config, self.config_path) if self.config.get("upgrade", {}).get("enabled", True) else None
-        self.tool_registry = build_default_registry(memory_store=self.memory, config=self.config, upgrade=self.upgrade)
-        if self.upgrade is not None:
-            self.context.extra_system = self.upgrade.notes.prompt_block
+        # He learns the user's habits - counts only, on their computer, which they can see, pause and wipe. [habits] enabled = false
+        # turns it off. What he learns goes into his prompt as a hint; the safety gate never reads it.
+        habit_config = self.config.get("habits", {})
+        habit_dir = habit_config.get("dir") or os.path.join(os.path.dirname(os.path.expanduser(memory_path)), "habits")
+        self.habits = Habits(habit_dir) if habit_config.get("enabled", True) else None
+        self.tool_registry = build_default_registry(memory_store=self.memory, config=self.config, upgrade=self.upgrade, habits=self.habits)
+        blocks = [block for block in (self.upgrade.notes.prompt_block if self.upgrade is not None else None, self.habits.prompt_block if self.habits is not None else None) if block]
+        if blocks:
+            self.context.extra_system = lambda: "".join(block() for block in blocks)
 
         # Set by the front end (CLI prompt, desktop bubble). Without one, anything the
         # safety gate wants confirmed is declined rather than silently run.
@@ -106,6 +113,11 @@ class BabyAI:
             print(response)
 
     def process_user_input(self, user_input: str) -> str:
+        if self.habits is not None:
+            try:
+                self.habits.observe(user_input)
+            except Exception:  # learning must never get in the way of an answer
+                pass
         self.context.add_user_message(user_input)
         messages = self.context.build_messages()
         tool_schemas = self.tool_registry.get_openai_tools() if self._tools_ok else None
@@ -200,6 +212,11 @@ class BabyAI:
             return f"{name} was called with bad arguments: {exc}"
         except Exception as exc:
             return f"{name} failed: {exc}"
+        if self.habits is not None:
+            try:
+                self.habits.observe_tool(name)
+            except Exception:
+                pass
         if isinstance(result, dict):
             text = str(result.get("content", ""))
         else:

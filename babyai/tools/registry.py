@@ -12,6 +12,7 @@ from babyai.tools.filesystem import (
     WriteFileTool,
 )
 from babyai.tools.interaction import AskUserTool, NotifyTool
+from babyai.tools.habits import HabitProfileTool
 from babyai.tools.memory import ForgetMemoryTool, RecallMemoryTool, RememberFactTool
 from babyai.tools.shell import RunShellTool
 from babyai.tools.system import GetSystemInfoTool, ManageProcessesTool
@@ -42,7 +43,7 @@ class ToolRegistry:
         return tool.invoke(**(arguments or {}))
 
 
-def build_default_registry(memory_store=None, config: dict[str, Any] | None = None, upgrade: Any = None) -> ToolRegistry:
+def build_default_registry(memory_store=None, config: dict[str, Any] | None = None, upgrade: Any = None, habits: Any = None) -> ToolRegistry:
     registry = ToolRegistry()
     tools = [
         ReadFileTool(memory_store, config),
@@ -67,6 +68,8 @@ def build_default_registry(memory_store=None, config: dict[str, Any] | None = No
         GetClipboardTool(memory_store, config),
         SetClipboardTool(memory_store, config),
     ]
+    if habits is not None:  # he learns the user's habits (babyai/habits); off unless the assistant sets it up
+        tools.append(HabitProfileTool(memory_store, config, habits))
     if upgrade is not None:  # he may upgrade himself (babyai/upgrade); off unless the assistant sets it up
         tools += [UpgradeCodeTool(memory_store, config, upgrade), UpgradeVersionTool(memory_store, config, upgrade),
                   UpgradeModelTool(memory_store, config, upgrade), UpgradeNotesTool(memory_store, config, upgrade)]
