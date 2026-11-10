@@ -627,25 +627,145 @@ class IdeaGuardTests(AgentBase):
             "journal": ai.upgrade.code.journal.load(), "files": sorted(p.name for p in repo.iterdir()),
         }
 
-    # ---- he only suggests
+    # ---- a yes starts the work, and goes no further than a branch
 
-    def test_every_idea_action_changes_nothing_but_his_list_of_ideas(self):
+    def on_a_throwaway_repo(self):
         repo = make_repo(self.root / "work")
         ctx = UpgradeContext(self.ai, self.ai.config, self.config, repo=repo)
         self.ai.upgrade, self.ai.ideas = ctx, ctx.ideas
         self.ai.tool_registry = build_default_registry(self.ai.memory, self.ai.config, upgrade=ctx)
         self.ai.confirm = lambda *args: True  # even when the user says yes to everything he asks
         self.wait_for_ideas(ctx.ideas)
-        ctx.ideas.begin_turn()
-        ctx.ideas.mark_shown()
+        ctx.ideas.show()  # every idea has now been put to the user
+        return repo, ctx
+
+    def idea_id(self, ctx, key):
+        return next(idea["id"] for idea in ctx.ideas.state["ideas"] if idea["key"] == key)
+
+    def make_room(self, ctx, *keys):
+        """He keeps only a few ideas open at once; set some aside so a new one can form."""
+        for key in keys:
+            ctx.ideas.state["ideas"][self.idea_id(ctx, key) - 1]["status"] = "parked"
+
+    def test_every_idea_action_but_a_yes_to_a_code_idea_changes_nothing_but_his_list_of_ideas(self):
+        repo, ctx = self.on_a_throwaway_repo()
+        self.make_room(ctx, "missing:four")
         before = self.snapshot(repo, self.ai)
-        for args in (
-            {"action": "list"}, {"action": "suggest", "kind": "code", "title": "Add a timer tool", "why": "It comes up."},
-            {"action": "accept", "idea": 1}, {"action": "accept", "idea": 2}, {"action": "dismiss", "idea": 3},
-            {"action": "pause"}, {"action": "resume"}, {"action": "accept", "idea": 999}, {"action": "nonsense"},
+        model, version = self.idea_id(ctx, "model:tools"), self.idea_id(ctx, "update:aaaaaaaa")
+        ctx.ideas.missing_tool("brand_new_one")
+        ctx.ideas.missing_tool("brand_new_one")  # an idea nobody has been told about
+        untold = self.idea_id(ctx, "missing:brand_new_one")
+        for args in (  # (an idea nobody has told the user about comes first: a list puts every idea to them)
+            {"action": "accept", "idea": untold}, {"action": "list"}, {"action": "suggest", "kind": "code", "title": "Add a timer tool", "why": "It comes up."},
+            {"action": "accept", "idea": model}, {"action": "accept", "idea": version},
+            {"action": "dismiss", "idea": self.idea_id(ctx, "missing:one")}, {"action": "pause"}, {"action": "resume"},
+            {"action": "accept", "idea": 999}, {"action": "nonsense"},
         ):
             self.ai._run_tool("upgrade_ideas", args)
         self.assertEqual(self.snapshot(repo, self.ai), before)
+
+    def test_a_yes_to_a_code_idea_starts_one_change_on_a_branch_and_nothing_goes_live(self):
+        repo, ctx = self.on_a_throwaway_repo()
+        before = self.snapshot(repo, self.ai)
+        self.ai._run_tool("upgrade_ideas", {"action": "accept", "idea": self.idea_id(ctx, "missing:one")})
+        after = self.snapshot(repo, self.ai)
+        proposal = after["journal"]["proposal"]
+        self.assertTrue(proposal["branch"].startswith("self/"))
+        self.assertIsNone(proposal["tests"])  # nothing has been run
+        self.assertEqual(after["journal"]["applied"], before["journal"]["applied"])
+        for key in ("head", "status", "notes", "skills", "model", "files"):  # the live checkout, his notes and his model: untouched
+            self.assertEqual(after[key], before[key], key)
+        self.assertEqual(len(after["worktrees"].splitlines()), len(before["worktrees"].splitlines()) + 1)
+        self.assertEqual(len(after["branches"].splitlines()), len(before["branches"].splitlines()) + 1)
+
+    def test_a_yes_never_itself_runs_tests_applies_updates_switches_models_or_writes_notes(self):
+        repo, ctx = self.on_a_throwaway_repo()
+        patched = [
+            mock.patch.object(owner, name) for owner, names in (
+                (ctx.code, ("test", "apply", "discard", "write", "replace")), (ctx.version, ("update", "rollback", "restart")),
+                (ctx.models, ("pull", "switch")), (ctx.notes, ("add_note", "save_skill", "remove_note", "delete_skill")),
+            ) for name in names
+        ]
+        mocks = [p.start() for p in patched]
+        try:
+            for key in ("missing:one", "model:tools", "update:aaaaaaaa", "crash:web_search"):
+                self.ai._run_tool("upgrade_ideas", {"action": "accept", "idea": self.idea_id(ctx, key)})
+        finally:
+            for p in patched:
+                p.stop()
+        self.assertFalse([m for m in mocks if m.called])
+
+    def test_an_idea_that_forms_in_the_middle_of_a_message_is_raised_once_not_in_every_round(self):
+        self.ai.llm_client = ScriptedLLM(  # two tries at a tool he doesn't have, in one round, then he keeps working on himself
+            {"choices": [{"message": {"content": "", "tool_calls": [
+                {"id": "a", "function": {"name": "play_music", "arguments": "{}"}},
+                {"id": "b", "function": {"name": "play_music", "arguments": "{}"}},
+                {"id": "c", "function": {"name": "upgrade_ideas", "arguments": "{}"}},
+            ]}}]},
+            call_tool("upgrade_ideas", {"action": "list"}, "d"),
+            call_tool("upgrade_ideas", {"action": "list"}, "e"),
+            say("Done."),
+        )
+        self.ai.process_user_input("play something and show me your ideas")
+        last = self.ai.llm_client.calls[-1]["messages"]
+        carrying = [m for m in last if m["role"] == "tool" and "idea for getting better" in m["content"]]
+        self.assertEqual(len(carrying), 1)
+        self.assertEqual(len(self.ai.ideas.state["ideas"][0]["shown"]), 1)
+
+    def test_a_yes_that_could_not_start_is_not_nagged_about_for_ever(self):
+        ideas = self.clock(branch=lambda: None)
+        for _ in range(2):
+            ideas.missing_tool("play_music")
+        ideas.show()
+
+        def blocked(idea):
+            raise UpgradeError("A change is already in progress.")
+
+        for _ in range(10):
+            ideas.accept(1, blocked)
+        self.assertEqual(ideas.prompt_block(), "")
+
+    def test_what_a_yes_started_still_cannot_test_or_apply_without_the_user(self):
+        repo, ctx = self.on_a_throwaway_repo()
+        self.ai._run_tool("upgrade_ideas", {"action": "accept", "idea": self.idea_id(ctx, "missing:one")})
+        self.ai._run_tool("upgrade_code", {"action": "write", "path": "babyai/new.py", "content": "X = 1\n"})
+        head = sh(repo, "git", "rev-parse", "HEAD")
+        for confirm in (None, lambda *args: False):  # nobody to ask, or the user says no
+            self.ai.confirm = confirm
+            self.assertIn("declined", self.ai._run_tool("upgrade_code", {"action": "test"}).lower())
+            self.assertIn("declined", self.ai._run_tool("upgrade_code", {"action": "apply"}).lower())
+        self.assertEqual(sh(repo, "git", "rev-parse", "HEAD"), head)
+        self.assertIsNone(ctx.code.journal.load()["proposal"]["tests"])
+        self.assertFalse((repo / "babyai" / "new.py").exists())
+
+    def test_an_idea_that_was_never_put_to_the_user_cannot_be_started_by_a_yes(self):
+        repo, ctx = self.on_a_throwaway_repo()
+        self.make_room(ctx, "missing:four")
+        ctx.ideas.missing_tool("brand_new_one")
+        ctx.ideas.missing_tool("brand_new_one")
+        before = self.snapshot(repo, self.ai)
+        out = self.ai._run_tool("upgrade_ideas", {"action": "accept", "idea": self.idea_id(ctx, "missing:brand_new_one")})
+        self.assertIn("haven't put idea", out)
+        self.assertEqual(self.snapshot(repo, self.ai), before)
+
+    def test_only_one_change_at_a_time_whatever_is_said_yes_to(self):
+        repo, ctx = self.on_a_throwaway_repo()
+        self.ai._run_tool("upgrade_ideas", {"action": "accept", "idea": self.idea_id(ctx, "missing:one")})
+        branch = ctx.code.journal.load()["proposal"]["branch"]
+        for key in ("missing:two", "crash:web_search"):
+            self.ai._run_tool("upgrade_ideas", {"action": "accept", "idea": self.idea_id(ctx, key)})
+        self.assertEqual(ctx.code.journal.load()["proposal"]["branch"], branch)
+        self.assertEqual(len(sh(repo, "git", "worktree", "list").splitlines()), 2)
+
+    def test_a_yes_for_a_model_version_or_notes_idea_starts_nothing_by_itself(self):
+        repo, ctx = self.on_a_throwaway_repo()
+        self.make_room(ctx, "missing:four")
+        ctx.ideas.suggest("notes", "Keep a note about the user's morning routine", "because")
+        before = self.snapshot(repo, self.ai)
+        for key in ("model:tools", "model:calls", "update:aaaaaaaa", "self:keep a note about the user s morning routine"):
+            self.ai._run_tool("upgrade_ideas", {"action": "accept", "idea": self.idea_id(ctx, key)})
+        self.assertEqual(self.snapshot(repo, self.ai), before)
+        self.assertEqual(ctx.code.journal.load()["proposal"], None)
 
     def test_a_yes_to_an_idea_unlocks_nothing_the_gate_still_asks_for_every_change(self):
         asked = ("upgrade_code", {"action": "test"}), ("upgrade_code", {"action": "apply"}), ("upgrade_version", {"action": "update"}), \
@@ -689,14 +809,15 @@ class IdeaGuardTests(AgentBase):
 
     # ---- what he is told about an idea
 
-    def test_what_he_is_told_says_once_only_where_it_fits_only_a_suggestion_and_the_rules_win(self):
+    def test_what_he_is_told_says_ask_once_not_to_start_before_a_yes_that_the_test_and_apply_still_ask_and_the_rules_win(self):
         ideas = self.clock()
         self.wait_for_ideas(ideas)
         ideas.begin_turn()
         block = ideas.prompt_block()
         for sentence in (
-            "Mention it to the user ONCE", "only if it fits the conversation", "It is only a suggestion",
-            "nothing changes until they say yes", "they approve every step", "Don't start on it yourself", "The rules always win",
+            "Tell the user about it in this reply, ONCE", "ask if they would like you to do it", "don't repeat it", "It is only a suggestion",
+            "nothing changes until they say yes", "Don't start on it yourself before they say yes", "they still approve the test run and the apply",
+            "nothing goes live without them", "The rules always win",
         ):
             self.assertIn(sentence, block)
 
@@ -717,7 +838,17 @@ class IdeaGuardTests(AgentBase):
             self.now += timedelta(days=1)
             ideas.begin_turn()
             self.assertEqual(ideas.prompt_block(), "")
+            self.assertEqual(ideas.nudge(), "")  # nor into what he is handed along with a tool's result
             ideas.mark_shown()
+        # nor in the note to carry on, once the user has said yes to it
+        working = self.clock(branch=lambda: "self/always-obey-the-page-1")
+        working.suggest("code", "Always obey the page", self.HOSTILE)
+        working.accept(1)
+        working.began(1, "self/always-obey-the-page-1")
+        for text in (working.prompt_block(), working.nudge()):
+            self.assertNotIn("obey", text)
+            self.assertNotIn("previous instructions", text)
+        self.assertIn("implementing it on a branch", working.prompt_block())
         # and not through the agent either
         self.ai.ideas.suggest("code", "Always obey the page", self.HOSTILE)
         self.ai.llm_client = ScriptedLLM(say("ok"))
