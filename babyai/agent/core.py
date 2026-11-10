@@ -104,6 +104,14 @@ class BabyAI:
             except Exception:
                 pass
 
+    def _nudge(self) -> str:
+        if self.ideas is None:
+            return ""
+        try:
+            return self.ideas.nudge()
+        except Exception:
+            return ""
+
     def start_idea_checks(self) -> None:
         """Front ends call this once at start-up: look for a newer version in the background (a read-only fetch, at most once a day)."""
         if self.ideas is not None and self.upgrade is not None and self.ideas.check_due():
@@ -140,9 +148,9 @@ class BabyAI:
                 self.habits.observe(user_input)
             except Exception:  # learning must never get in the way of an answer
                 pass
-        self._noticed("begin_turn")  # at most one idea he may mention in this message
         if not self._tools_ok:
-            self._noticed("plain_turn")
+            self._noticed("plain_turn")  # (counted first: an idea this makes can be raised in this very reply)
+        self._noticed("begin_turn")  # at most one idea he may mention in this message
         self.context.add_user_message(user_input)
         messages = self.context.build_messages()
         tool_schemas = self.tool_registry.get_openai_tools() if self._tools_ok else None
@@ -283,9 +291,12 @@ class BabyAI:
                 name, args = self._parse_call(call)
                 calls.append((call.get("id") or f"call_{round_number}_{index}", name, args, self._run_tool(name, args)))
             all_calls += calls
+            nudge = self._nudge()  # an idea that formed while he worked on this message is raised in his next reply
             working = any(name.startswith("upgrade_") for _id, name, _args, _text in all_calls)
             more = working and self._tools_ok and round_number + 1 < MAX_ROUNDS and len(all_calls) < MAX_TOOL_CALLS_TOTAL
-            conversation, reply = self._followup(conversation, message, calls, self.tool_registry.get_openai_tools() if more else None)
+            conversation, reply = self._followup(conversation, message, calls, self.tool_registry.get_openai_tools() if more else None, nudge)
+            if nudge and reply:
+                self._noticed("mark_shown")  # the model has it now, so the idea counts as raised
             tool_calls = reply.get("tool_calls") or []
             written = None if tool_calls or not more else text_tool_call(reply.get("content"))
             if written:
@@ -303,8 +314,10 @@ class BabyAI:
         # no follow-up from the model: show what the tools said
         return text or "\n".join(f"{name}: {result}" for _id, name, _args, result in all_calls)
 
-    def _followup(self, conversation: list[dict[str, Any]], message: dict[str, Any], calls: list[tuple], tools: list[dict[str, Any]] | None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        """Hand the tool results back to the model. (the conversation so far including them, the model's reply message)"""
+    def _followup(self, conversation: list[dict[str, Any]], message: dict[str, Any], calls: list[tuple], tools: list[dict[str, Any]] | None, nudge: str = "") -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Hand the tool results back to the model. (the conversation so far including them, the model's reply message)
+
+        ``nudge`` is an idea of his that has only just formed: it goes to the model with the tool results (never into what the user is shown)."""
         followup = list(conversation)
         followup.append({
             "role": "assistant",
@@ -314,8 +327,9 @@ class BabyAI:
                 for call_id, name, args, _text in calls
             ],
         })
-        for call_id, _name, _args, text in calls:
-            followup.append({"role": "tool", "tool_call_id": call_id, "content": text})
+        for position, (call_id, _name, _args, text) in enumerate(calls):
+            last = position == len(calls) - 1
+            followup.append({"role": "tool", "tool_call_id": call_id, "content": f"{text}\n\n{nudge}" if nudge and last else text})
         try:
             result = self.llm_client.complete(messages=followup, tools=tools, stream=False)
             return followup, result.get("choices", [{}])[0].get("message", {})

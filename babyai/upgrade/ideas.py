@@ -1,4 +1,4 @@
-"""He thinks for himself about how to get better, and says so - but he only ever suggests.
+"""He thinks for himself about how to get better, asks the user as soon as he has a good idea, and starts on it when they say yes.
 
 What he watches, as plain counts (never anything the user said, and nothing from a tool's output): tools he reached for
 and doesn't have, tools that crashed, how many messages he could only chat because his model can't use tools, tool calls
@@ -7,10 +7,13 @@ exist. When a count passes a threshold it becomes an *idea*: a short title and a
 counts. He can also file an idea he thought of himself (``suggest``); his own words are kept for the user to read, but
 they are never put into his system prompt, so nothing he read on a web page can reach his instructions through here.
 
-What he does with an idea: at most one is put in front of him per message and no more often than ``min_hours`` (a day by
-default), with a plain instruction to mention it once, briefly, only where it fits. It is a suggestion: nothing in this
-module changes him, his code, his model or his machine - the other ``upgrade_`` tools do that, and they still ask the user
-first. A dismissed idea never comes back; an idea nobody answered is raised at most three times, a week apart.
+What he does with an idea: he asks as soon as he can - in the reply to the very message where it formed, or in the next one -
+at most one idea per message, and (after a no, or when nobody answered) not again for ``min_hours`` (a day by default). The
+moment the user says yes (``accept``) he begins implementing it himself, without being asked again: for a code idea the change
+is started on a branch for him, and a note in his instructions keeps him at it until it is applied or thrown away. Starting
+is as far as a yes goes by itself: nothing goes live without the user approving the test run and the apply, and every other
+``upgrade_`` step (update, model switch, notes) still asks. A dismissed idea never comes back; an idea nobody answered is raised
+at most three times, a week apart. An idea can only be accepted once it has been put to the user.
 """
 
 from __future__ import annotations
@@ -48,25 +51,43 @@ BRANCH = re.compile(r"[A-Za-z0-9._/\-]{1,60}")
 SHA = re.compile(r"[0-9a-f]{7,40}")
 
 NEXT_STEP = {
-    "code": "work on it on a branch with upgrade_code (start with a goal, then write or replace, test, diff, apply)",
-    "model": "see what the server has with upgrade_model list (pulling or switching a model asks the user)",
-    "version": "upgrade_version check, then update (the new version's tests run first), then restart",
-    "notes": "write it down with upgrade_notes add_note or save_skill",
+    "code": "start a change with upgrade_code start (give it a goal), write the change and a test for it with write or replace, then test, diff and apply",
+    "model": "run upgrade_model list now, pick one that fits, then pull it and switch to it (the user approves each of those)",
+    "version": "run upgrade_version check now, then update (the new version's tests run first), then restart (the user approves those)",
+    "notes": "write it down with upgrade_notes add_note or save_skill (the user approves)",
 }
+
+NEXT_STEP_BEGUN = "look at how similar code is written first (read_file, find_files or search_files in the branch folder), then write the change and a test for it (upgrade_code write or replace), then test, diff and apply"  # the branch is already started
 
 HINT = (
     "Something you have been thinking about for yourself, an idea for getting better (idea #{id}): {title}. {why} "
-    "Mention it to the user ONCE, briefly and in your own voice, but only if it fits the conversation: if they are busy with "
-    "something else, leave it; it will come back later. It is only a suggestion: nothing changes until they say yes, and they "
-    "approve every step. Don't start on it yourself. If they say yes use upgrade_ideas accept {id}; if they say no, "
-    "upgrade_ideas dismiss {id}. The rules always win."
+    "Tell the user about it in this reply, ONCE, briefly and in your own voice: first deal with what they asked, then add the "
+    "idea and ask if they would like you to do it. If they don't answer, don't repeat it. It is only a suggestion: nothing "
+    "changes until they say yes. Don't start on it yourself before they say yes. When they say yes, call upgrade_ideas accept "
+    "{id} and then carry on implementing it yourself without asking again (they still approve the test run and the apply, so "
+    "nothing goes live without them); if they say no, call upgrade_ideas dismiss {id}. The rules always win."
 )
+
+CARRY_ON = (
+    "The user said yes to your idea #{id}{title}, and you are implementing it on a branch (upgrade_code status shows where you "
+    "are and what it is for). Deal with what they have just said first; then carry on without being asked again: write the code "
+    "and a test for it, then run the tests, look at the diff and apply it. The user is asked to approve the test run and the "
+    "apply, and nothing goes live without them. Don't start another change until this one is applied or thrown away; if they "
+    "tell you to stop, upgrade_code discard throws it away. The rules always win."
+)
+
+NOT_STARTED = (
+    "The user said yes to your idea #{id}{title}, but it has not been started yet (another change was in the way). If nothing is "
+    "in your way now, start it: call upgrade_ideas accept {id}. The rules always win."
+)
+
+MAX_START_TRIES = 3  # a yes that could not start is reminded about this many times, then left to the user to ask again
 
 
 def _fresh() -> dict[str, Any]:
     return {
         "version": 1, "paused": False, "next_id": 1, "ideas": [], "missing": {}, "crashes": {}, "plain_turns": 0, "text_calls": 0,
-        "last_shown": None, "checked": None, "quiet": {}, "self_today": ["", 0],
+        "last_shown": None, "last_shown_id": None, "checked": None, "quiet": {}, "self_today": ["", 0],
     }
 
 
@@ -77,6 +98,7 @@ def _valid(state: Any) -> bool:
             state["version"] == 1 and isinstance(state["paused"], bool) and isinstance(state["next_id"], int)
             and all(isinstance(state[key], int) and state[key] >= 0 for key in ("plain_turns", "text_calls"))
             and all(state[key] is None or isinstance(state[key], str) for key in ("last_shown", "checked"))
+            and (state.get("last_shown_id") is None or isinstance(state["last_shown_id"], int))
             and all(isinstance(k, str) and isinstance(v, int) for table in (state["missing"], state["crashes"]) for k, v in table.items())
             and all(isinstance(k, str) and isinstance(v, str) for k, v in state["quiet"].items())
             and isinstance(state["self_today"][0], str) and isinstance(state["self_today"][1], int)
@@ -84,6 +106,8 @@ def _valid(state: Any) -> bool:
                 isinstance(i["id"], int) and isinstance(i["key"], str) and i["kind"] in KINDS and isinstance(i["title"], str)
                 and isinstance(i["why"], str) and i["source"] in ("signal", "self") and i["status"] in STATUSES
                 and isinstance(i["created"], str) and isinstance(i["shown"], list) and all(isinstance(t, str) for t in i["shown"])
+                and isinstance(i.get("told", False), bool) and isinstance(i.get("waiting", False), bool)
+                and (i.get("branch") is None or isinstance(i["branch"], str)) and isinstance(i.get("tries", 0), int)
                 for i in state["ideas"]
             )
         )
@@ -98,12 +122,13 @@ def _plural(count: int, noun: str) -> str:
 class Ideas:
     def __init__(
         self, directory: str | Path, clock: Callable[[], datetime] = datetime.now, busy: Callable[[], bool] | None = None,
-        min_hours: float = MIN_HOURS, fetch_updates: bool = True,
+        min_hours: float = MIN_HOURS, fetch_updates: bool = True, branch: Callable[[], str | None] | None = None,
     ) -> None:
         self.directory = Path(os.path.expanduser(str(directory)))
         self.path = self.directory / "ideas.json"
         self._clock = clock
         self._busy = busy
+        self._branch = branch  # the branch of the change he has in progress, if any
         try:
             self.min_hours = max(1.0, float(min_hours))  # never more often than hourly, whatever the config says
         except (TypeError, ValueError):
@@ -288,7 +313,9 @@ class Ideas:
                 return
             now = self._clock()
             last = self._when(self.state["last_shown"])
-            if last is not None and now - last < timedelta(hours=self.min_hours):
+            last_idea = self._find(self.state.get("last_shown_id"))
+            said_yes = last_idea is not None and last_idea["status"] == ACCEPTED  # then there is nothing to wait out
+            if last is not None and not said_yes and now - last < timedelta(hours=self.min_hours):
                 return
             ready = [idea for idea in self.state["ideas"] if idea["source"] == "signal" and idea["status"] == OPEN and self._due(idea, now)]
             if not ready:
@@ -307,12 +334,44 @@ class Ideas:
         return last is not None and now - last >= timedelta(days=RERAISE_DAYS)
 
     def prompt_block(self) -> str:
-        """What goes into his system prompt this message: nothing, unless there is an idea due. Only ideas built from counts get in."""
+        """What goes into his system prompt this message: a reminder to carry on with a change the user said yes to, and an idea if
+        one is due. Only words made from counts get in: never his own words from an idea he filed."""
         with self._lock:
-            idea = self._find(self.current) if self.current is not None else None
-            if idea is None or self.paused or idea["source"] != "signal" or idea["status"] != OPEN:
-                return ""
-            return "\n" + HINT.format(id=idea["id"], title=idea["title"], why=idea["why"])
+            return self._carry_on() + self._fresh_hint()
+
+    def _fresh_hint(self) -> str:
+        idea = self._find(self.current) if self.current is not None else None
+        if idea is None or self.paused or idea["source"] != "signal" or idea["status"] != OPEN:
+            return ""
+        return "\n" + HINT.format(id=idea["id"], title=idea["title"], why=idea["why"])
+
+    def _carry_on(self) -> str:
+        """While he is implementing an idea the user said yes to, a note to keep going (not a licence to do more: the test run and the
+        apply still ask)."""
+        try:
+            branch = self._branch() if self._branch is not None else None
+        except Exception:
+            return ""
+        if self.paused:
+            return ""
+        if branch:
+            idea = next((i for i in self.state["ideas"] if i["status"] == ACCEPTED and i.get("branch") == branch), None)
+            template = CARRY_ON
+        else:  # nothing in progress: is there a yes that never got to start?
+            idea = next((i for i in self.state["ideas"] if i["status"] == ACCEPTED and i.get("waiting") and i.get("tries", 0) < MAX_START_TRIES), None)
+            template = NOT_STARTED
+        if idea is None:
+            return ""
+        title = f" ({idea['title']})" if idea["source"] == "signal" else ""  # his own words stay out of his instructions
+        return "\n" + template.format(id=idea["id"], title=title)
+
+    def nudge(self) -> str:
+        """An idea that formed during this very message can be raised in his next reply instead of waiting for the next message.
+        Returns the words for him (empty if nothing is due). It counts as raised only when ``mark_shown`` is called, once the model
+        has them - so a reply that never came does not use the idea up."""
+        with self._lock:
+            self.begin_turn()
+            return self._fresh_hint().strip()
 
     def mark_shown(self) -> None:
         """The message went through, so the idea was in front of him. It counts as raised, and the clock for the next one starts."""
@@ -323,7 +382,9 @@ class Ideas:
                 return
             now = self._clock()
             idea["shown"].append(self._stamp(now))
+            idea["told"] = True
             self.state["last_shown"] = self._stamp(now)
+            self.state["last_shown_id"] = idea["id"]
             if len(idea["shown"]) >= MAX_SHOWINGS:
                 idea["status"] = PARKED
             self._save()
@@ -357,27 +418,52 @@ class Ideas:
                 out.append("I don't have any ideas for getting better right now. I watch for tools I keep reaching for and don't have, tools that crash, "
                            "a model that can't use tools, and newer versions of me; if I think of something I'll say so.")
             else:
-                out.append("My ideas for getting better. I only suggest: nothing changes until you say yes, and you approve every step.")
+                out.append("My ideas for getting better. Say yes to one and I'll start on it; you approve the test run and the apply, so nothing goes live without you.")
                 for idea in live + [idea for idea in ideas if idea["status"] == ACCEPTED]:
                     out.append(f"#{idea['id']} ({idea['status']}) {idea['title']} - {idea['why']}")
+                    if idea["status"] in (OPEN, PARKED) and not idea.get("told"):
+                        idea["told"] = True  # the user is being shown it, so it has been put to them
+                        self._save()
                 dropped = sum(1 for idea in ideas if idea["status"] in (DISMISSED, SUPERSEDED))
                 if dropped:
                     out.append(f"({_plural(dropped, 'idea')} you said no to or that went out of date, not shown.)")
             out.append(f"It is all in one file you can open or delete: {self.path}. I can pause or resume it if you ask.")
             return "\n".join(out)
 
-    def accept(self, idea_id: Any) -> str:
-        """The user said yes to an idea. This only records it: doing it is the job of the other upgrade_ tools, which still ask."""
+    def accept(self, idea_id: Any, begin: Callable[[dict[str, Any]], str] | None = None) -> str:
+        """The user said yes to an idea, and he begins implementing it now. ``begin`` (given by the tool) does the first step of a code
+        idea - starting the change on a branch. Nothing goes live from here: the test run and the apply still ask the user, and
+        so does every other upgrade_ step. An idea that was never put to the user cannot be accepted: there is no yes to act on."""
         with self._lock:
             idea = self._number(idea_id)
             if idea["status"] == SUPERSEDED:
                 raise UpgradeError(f"Idea #{idea['id']} is out of date (something newer replaced it), so there's nothing to do for it.")
+            if not idea.get("told"):
+                raise UpgradeError(f"I haven't put idea #{idea['id']} to the user yet, so there is no yes to act on. Tell them about it and ask first.")
             idea["status"] = ACCEPTED
+            started = ""
+            if begin is not None and not idea.get("branch"):  # not begun yet (a yes that was blocked can be started later)
+                try:
+                    started = begin(idea)
+                except UpgradeError as exc:
+                    idea["waiting"] = True
+                    idea["tries"] = idea.get("tries", 0) + 1
+                    self._save()
+                    return f"Idea #{idea['id']} is a yes. I couldn't start it just yet: {exc} It stays accepted, and I'll start it as soon as that is sorted out."
+                idea["waiting"] = False
             self._save()
-            return (
-                f"Idea #{idea['id']} ({idea['title']}) is a yes. Nothing has changed yet. Next: {NEXT_STEP[idea['kind']]}. "
-                "The user still approves the test run, the apply and every other change."
-            )
+            lead = f"Idea #{idea['id']} ({idea['title']}) is a yes, so begin now and don't ask again."
+            if started:
+                lead += f" {started}"
+            return f"{lead} Next: {NEXT_STEP_BEGUN if started else NEXT_STEP[idea['kind']]}. The user is asked to approve the test run and the apply; nothing goes live without them."
+
+    def began(self, idea_id: Any, branch: str) -> None:
+        """Remember which branch an accepted idea is being implemented on, so the note to carry on shows while it is in progress."""
+        with self._lock:
+            idea = self._find(idea_id)
+            if idea is not None and isinstance(branch, str):
+                idea["branch"] = branch
+                self._save()
 
     def dismiss(self, idea_id: Any) -> str:
         with self._lock:
@@ -416,11 +502,13 @@ class Ideas:
                 return f"I already have that idea (#{same['id']})." if same else "I can't keep another idea right now: there are too many open ones."
             self.state["self_today"] = [today, (used if day == today else 0) + 1]
             idea["shown"].append(self._stamp(now))  # he is about to tell the user, so this counts as raised
+            idea["told"] = True
             self.state["last_shown"] = self._stamp(now)
+            self.state["last_shown_id"] = idea["id"]
             self._save()
             return (
-                f"Noted as idea #{idea['id']}. Now tell the user about it in a sentence or two, in your own voice, and ask if they'd like you to work on it. "
-                "You only suggest: nothing changes until they say yes."
+                f"Noted as idea #{idea['id']}. Tell the user about it now, in this reply: a sentence or two in your own voice, then ask if they'd like you to do it. "
+                f"Nothing changes until they say yes. When they do, call upgrade_ideas accept {idea['id']} and carry on implementing it yourself (they still approve the test run and the apply)."
             )
 
     def pause(self) -> str:

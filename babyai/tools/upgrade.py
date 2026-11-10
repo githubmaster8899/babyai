@@ -112,20 +112,32 @@ class UpgradeModelTool(_UpgradeTool):
 class UpgradeIdeasTool(_UpgradeTool):
     name = "upgrade_ideas"
     description = (
-        "Your own ideas for getting better. You only suggest: nothing changes until the user says yes, and they approve every step. "
+        "Your own ideas for getting better. Nothing changes until the user says yes, and the test run and the apply always ask them. "
         "Actions: list - the ideas you have and what became of them; "
-        "suggest (kind, title, why) - note an idea you thought of yourself (kind: code, model, version or notes; keep it general, "
-        "no file paths, links or personal details), then tell the user about it in a sentence or two; "
-        "accept (idea) - the user said yes (this only records it: do the work with the other upgrade_ tools, which still ask); "
+        "suggest (kind, title, why) - note a good idea you thought of yourself (kind: code, model, version or notes; keep it general, "
+        "no file paths, links or personal details), then tell the user about it straight away and ask if they want it; "
+        "accept (idea) - the user said yes: this starts the change on a branch for a code idea, and then you carry on implementing it "
+        "yourself without asking again; "
         "dismiss (idea) - the user said no; pause / resume - stop or restart having ideas."
     )
 
     def invoke(self, action: str = "list", idea: int = 0, kind: str = "", title: str = "", why: str = "") -> ToolResult:
         ideas = self.upgrade.ideas
         return self._dispatch(action, {
-            "list": ideas.show, "suggest": lambda: ideas.suggest(kind, title, why), "accept": lambda: ideas.accept(idea),
+            "list": ideas.show, "suggest": lambda: ideas.suggest(kind, title, why), "accept": lambda: ideas.accept(idea, self._begin),
             "dismiss": lambda: ideas.dismiss(idea), "pause": ideas.pause, "resume": ideas.resume,
         })
+
+    def _begin(self, idea: dict[str, Any]) -> str:
+        """The first step of a yes: a code idea gets its change started on a branch (not live; the test run and the apply still ask)."""
+        if idea["kind"] != "code":
+            return ""
+        code = self.upgrade.code
+        said = code.start(idea["title"])
+        proposal = code.journal.load()["proposal"]
+        if proposal:
+            self.upgrade.ideas.began(idea["id"], proposal["branch"])
+        return said
 
     def preview(self, action: str = "", **_: Any) -> dict[str, Any] | None:
         return self.upgrade.ideas.preview(action)

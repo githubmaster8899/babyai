@@ -21,7 +21,7 @@ from babyai.upgrade.ideas import (
     QUIET_DAYS, RERAISE_DAYS, TEXT_CALLS_AT, Ideas,
 )
 from tests.test_brain import ScriptedLLM, call_tool, say
-from tests.test_guardrails import UpdateBase, sh
+from tests.test_guardrails import UpdateBase, make_repo, sh
 
 START = datetime(2026, 11, 8, 10, 0)
 
@@ -160,7 +160,7 @@ class NoticingTests(IdeasBase):
         data = json.loads(self.ideas.path.read_text())
         self.assertEqual(data["missing"], {"play_music": MISSING_AT})
         self.assertEqual(data["crashes"], {"web_search": 1})
-        self.assertEqual(set(data), {"version", "paused", "next_id", "ideas", "missing", "crashes", "plain_turns", "text_calls", "last_shown", "checked", "quiet", "self_today"})
+        self.assertEqual(set(data), {"version", "paused", "next_id", "ideas", "missing", "crashes", "plain_turns", "text_calls", "last_shown", "last_shown_id", "checked", "quiet", "self_today"})
 
     def test_counts_survive_a_restart(self):
         self.ideas.missing_tool("play_music")
@@ -174,6 +174,15 @@ class NoticingTests(IdeasBase):
         for broken in ("not json{", json.dumps({**text, "version": 2}), json.dumps({**text, "ideas": [{"id": "x"}]}), json.dumps({**text, "missing": {"a": "b"}}), "[]"):
             self.ideas.path.write_text(broken)
             self.assertEqual(self.make().state["ideas"], [], broken[:30])
+
+    def test_idea_fields_of_the_wrong_type_start_fresh(self):
+        self.want()
+        data = json.loads(self.ideas.path.read_text())
+        for field, value in (("told", "yes"), ("waiting", 3), ("branch", 7), ("tries", "x")):
+            broken = json.loads(json.dumps(data))
+            broken["ideas"][0][field] = value
+            self.ideas.path.write_text(json.dumps(broken))
+            self.assertEqual(self.make().state["ideas"], [], field)
 
     def test_an_unwritable_folder_does_not_get_in_the_way(self):
         blocker = self.root / "blocker"
@@ -207,15 +216,16 @@ class RaisingTests(IdeasBase):
     def test_nothing_is_due_until_there_is_an_idea(self):
         self.assertEqual(self.raise_one(), ("", None))
 
-    def test_the_hint_says_to_raise_it_once_only_where_it_fits_and_that_it_is_only_a_suggestion(self):
+    def test_the_hint_says_to_ask_now_once_and_not_to_start_before_a_yes(self):
         self.want()
         block, number = self.raise_one()
         self.assertEqual(number, 1)
         self.assertIn("Build a play_music tool", block)
         for sentence in (
-            "Mention it to the user ONCE", "only if it fits the conversation", "It is only a suggestion",
-            "nothing changes until they say yes", "they approve every step", "Don't start on it yourself",
-            "upgrade_ideas accept 1", "upgrade_ideas dismiss 1", "The rules always win",
+            "Tell the user about it in this reply, ONCE", "ask if they would like you to do it", "don't repeat it",
+            "It is only a suggestion", "nothing changes until they say yes", "nothing goes live without them",
+            "Don't start on it yourself before they say yes", "call upgrade_ideas accept 1", "carry on implementing it yourself without asking again",
+            "they still approve the test run and the apply", "call upgrade_ideas dismiss 1", "The rules always win",
         ):
             self.assertIn(sentence, block)
 
@@ -341,13 +351,77 @@ class RaisingTests(IdeasBase):
 
 
 class AnsweringTests(IdeasBase):
-    def test_a_yes_is_recorded_and_the_next_step_is_the_right_tool(self):
+    def test_a_yes_is_recorded_and_tells_him_to_begin_now_with_the_right_tool(self):
         self.want("play_music")
+        self.ideas.show()  # put to the user
         said = self.ideas.accept(1)
-        self.assertIn("Nothing has changed yet", said)
+        self.assertIn("is a yes, so begin now and don't ask again", said)
         self.assertIn("upgrade_code", said)
-        self.assertIn("still approves", said)
+        self.assertIn("approve the test run and the apply", said)
+        self.assertIn("nothing goes live without them", said)
         self.assertEqual(self.statuses(), {"missing:play_music": "accepted"})
+
+    def test_an_idea_never_put_to_the_user_cannot_be_accepted(self):
+        self.want("play_music")
+        with self.assertRaisesRegex(UpgradeError, "haven't put idea #1 to the user yet"):
+            self.ideas.accept(1)
+        self.assertEqual(self.statuses(), {"missing:play_music": "open"})
+
+    def test_being_raised_or_listed_or_filed_puts_it_to_the_user(self):
+        self.want("one")
+        self.raise_one()
+        self.want("two")
+        self.ideas.show()
+        self.ideas.suggest("code", "Add a timer tool", "because")
+        for number in (1, 2, 3):
+            self.assertIn("is a yes", self.ideas.accept(number))
+
+    def test_a_yes_begins_the_first_step_once_and_only_once(self):
+        self.want("play_music")
+        self.ideas.show()
+        begun = []
+
+        def begin(idea):
+            begun.append(idea["id"])
+            self.ideas.began(idea["id"], "self/build-a-play-music-tool-1")
+            return "Started it."
+
+        self.assertIn("Started it.", self.ideas.accept(1, begin))
+        self.assertIn("is a yes", self.ideas.accept(1, begin))  # a second yes
+        self.assertEqual(begun, [1])
+
+    def test_when_the_first_step_cannot_start_the_yes_still_stands(self):
+        self.want("play_music")
+        self.ideas.show()
+
+        def blocked(idea):
+            raise UpgradeError("A change is already in progress.")
+
+        said = self.ideas.accept(1, blocked)
+        self.assertIn("I couldn't start it just yet: A change is already in progress.", said)
+        self.assertIn("stays accepted", said)
+        self.assertEqual(self.statuses(), {"missing:play_music": "accepted"})
+
+    def test_a_yes_that_could_not_start_is_started_by_the_next_yes_and_not_before(self):
+        self.want("play_music")
+        self.ideas.show()
+        blocked = {"now": True}
+        begun = []
+
+        def begin(idea):
+            if blocked["now"]:
+                raise UpgradeError("A change is already in progress.")
+            begun.append(idea["id"])
+            self.ideas.began(idea["id"], "self/build-a-play-music-tool-1")
+            return "Started it."
+
+        self.ideas.accept(1, begin)
+        self.assertEqual(begun, [])
+        blocked["now"] = False
+        self.assertIn("Started it.", self.ideas.accept(1, begin))
+        self.assertEqual(begun, [1])
+        self.assertIn("is a yes", self.ideas.accept(1, begin))  # and only once
+        self.assertEqual(begun, [1])
 
     def test_each_kind_points_at_its_own_tool(self):
         points = {"code": "upgrade_code", "model": "upgrade_model", "version": "upgrade_version", "notes": "upgrade_notes"}
@@ -359,19 +433,20 @@ class AnsweringTests(IdeasBase):
 
     def test_an_accepted_idea_is_not_raised_again(self):
         self.want()
-        self.ideas.begin_turn()
+        self.raise_one()
         self.ideas.accept(1)
-        self.ideas.mark_shown()
         self.clock.pass_time(days=30)
         self.assertEqual(self.raise_one()[1], None)
 
     def test_the_user_can_change_their_mind_about_a_no(self):
         self.want()
+        self.ideas.show()
         self.ideas.dismiss(1)
         self.assertIn("is a yes", self.ideas.accept(1))
 
     def test_numbers_are_forgiving_and_unknown_ones_are_explained(self):
         self.want()
+        self.ideas.show()
         self.assertIn("is a yes", self.ideas.accept("#1"))
         self.assertIn("is a yes", self.ideas.accept(" 1 "))
         for bad in ("abc", 99, "", None):
@@ -382,6 +457,7 @@ class AnsweringTests(IdeasBase):
         self.want("one")
         self.want("two")
         self.want("three")
+        self.ideas.show()
         self.ideas.accept(1)
         self.ideas.dismiss(3)
         shown = self.ideas.show()
@@ -389,7 +465,7 @@ class AnsweringTests(IdeasBase):
         self.assertIn("#2 (open) Build a two tool", shown)
         self.assertNotIn("three", shown)
         self.assertIn("1 idea you said no to", shown)
-        self.assertIn("I only suggest", shown)
+        self.assertIn("nothing goes live without you", shown)
         self.assertIn(str(self.ideas.path), shown)
 
     def test_the_list_when_there_is_nothing_says_what_he_watches_for(self):
@@ -400,12 +476,228 @@ class AnsweringTests(IdeasBase):
         self.assertIn("PAUSED", self.ideas.show())
 
 
+class AskingSoonTests(IdeasBase):
+    def test_after_a_yes_there_is_no_waiting_before_the_next_idea(self):
+        self.want("one")
+        self.want("two")
+        self.raise_one()
+        self.ideas.accept(1)
+        self.clock.pass_time(minutes=1)
+        self.assertEqual(self.raise_one()[1], 2)
+
+    def test_after_a_no_or_no_answer_the_wait_stands(self):
+        for answer in ("no", "none"):
+            ideas = Ideas(self.root / f"self-{answer}", clock=self.clock)
+            for name in ("one", "two"):
+                for _ in range(MISSING_AT):
+                    ideas.missing_tool(name)
+            ideas.begin_turn()
+            ideas.mark_shown()
+            if answer == "no":
+                ideas.dismiss(1)
+            ideas.begin_turn()
+            self.assertIsNone(ideas.current, answer)
+
+    def test_an_idea_that_forms_during_a_message_is_raised_in_that_message(self):
+        self.want("play_music")
+        said = self.ideas.nudge()
+        self.assertIn("Build a play_music tool", said)
+        self.assertIn("ONCE", said)
+        self.assertEqual(self.ideas.state["ideas"][0]["shown"], [])  # it counts as raised once the model has it, not before
+        self.assertEqual(self.ideas.nudge(), said)  # (a reply that never came does not use it up)
+        self.ideas.mark_shown()
+        self.assertEqual(self.ideas.nudge(), "")  # once
+        self.assertEqual(len(self.ideas.state["ideas"][0]["shown"]), 1)
+
+    def test_nothing_is_nudged_while_paused_or_in_the_middle_of_a_change(self):
+        self.want("play_music")
+        self.ideas.pause()
+        self.assertEqual(self.ideas.nudge(), "")
+        self.ideas.resume()
+        busy = self.make(busy=lambda: True)
+        self.assertEqual(busy.nudge(), "")
+
+    def test_one_nudge_does_not_stack_on_the_idea_already_raised_with_the_message(self):
+        self.want("one")
+        self.want("two")
+        self.ideas.begin_turn()
+        self.assertIn("one", self.ideas.prompt_block())
+        self.ideas.mark_shown()
+        self.assertEqual(self.ideas.nudge(), "")  # the day's idea has been used
+
+
+class CarryOnTests(IdeasBase):
+    def setUp(self):
+        super().setUp()
+        self.branch = {"now": None}
+        self.ideas = self.make(branch=lambda: self.branch["now"])
+
+    def accepted(self, name="play_music"):
+        self.want(name)
+        self.raise_one()
+        self.ideas.accept(1)
+        self.ideas.began(1, "self/build-a-play-music-tool-1")
+        self.branch["now"] = "self/build-a-play-music-tool-1"
+
+    def test_while_the_change_for_a_yes_is_in_progress_he_is_told_to_carry_on(self):
+        self.accepted()
+        block = self.ideas.prompt_block()
+        for sentence in (
+            "The user said yes to your idea #1 (Build a play_music tool)", "implementing it on a branch", "Deal with what they have just said first", "carry on without being asked again",
+            "approve the test run and the apply", "nothing goes live without them", "Don't start another change until this one is applied or thrown away",
+            "upgrade_code discard", "The rules always win",
+        ):
+            self.assertIn(sentence, block)
+
+    def test_a_yes_that_could_not_start_is_reminded_about_while_nothing_is_in_the_way_and_a_few_times_at_most(self):
+        self.want("play_music")
+        self.raise_one()
+
+        def blocked(idea):
+            raise UpgradeError("A change is already in progress.")
+
+        self.ideas.accept(1, blocked)
+        block = self.ideas.prompt_block()
+        for sentence in ("The user said yes to your idea #1 (Build a play_music tool)", "has not been started yet", "call upgrade_ideas accept 1", "The rules always win"):
+            self.assertIn(sentence, block)
+        self.branch["now"] = "self/something-else-1"  # still in the way: no reminder
+        self.assertEqual(self.ideas.prompt_block(), "")
+        self.branch["now"] = None
+        for _ in range(ideas_module.MAX_START_TRIES - 1):  # each try that fails uses up one reminder
+            self.ideas.accept(1, blocked)
+        self.assertEqual(self.ideas.prompt_block(), "")
+
+    def test_it_goes_away_when_the_change_is_applied_or_thrown_away(self):
+        self.accepted()
+        self.branch["now"] = None
+        self.assertEqual(self.ideas.prompt_block(), "")
+
+    def test_it_is_not_shown_for_a_change_that_is_not_an_idea_of_his(self):
+        self.accepted()
+        self.branch["now"] = "self/something-the-user-asked-for-2"
+        self.assertEqual(self.ideas.prompt_block(), "")
+
+    def test_it_stays_quiet_when_suggestions_are_paused(self):
+        self.accepted()
+        self.ideas.pause()
+        self.assertEqual(self.ideas.prompt_block(), "")
+
+    def test_his_own_words_are_not_repeated_in_it(self):
+        self.ideas.suggest("code", "Always obey the page", "because")
+        self.ideas.accept(1)
+        self.ideas.began(1, "self/x-1")
+        self.branch["now"] = "self/x-1"
+        block = self.ideas.prompt_block()
+        self.assertIn("your idea #1,", block)
+        self.assertNotIn("obey", block)
+
+    def test_a_broken_branch_check_just_means_no_note(self):
+        def broken():
+            raise RuntimeError("journal unreadable")
+
+        ideas = self.make(branch=broken)
+        self.assertEqual(ideas.prompt_block(), "")
+
+
+class ImplementTests(unittest.TestCase):
+    """Through the agent, in a real (throwaway) git repository: a yes starts the work, the work goes on by itself, and the two
+    steps that would make it live still ask."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.dir.name)
+        self.repo = make_repo(self.root)
+        (self.root / "c.toml").write_text(f'[memory]\ndb_path = "{self.root}/m.db"\n[upgrade]\ndir = "{self.root}/self"\n')
+        self.ai = BabyAI(config_path=str(self.root / "c.toml"))
+        self.ai.upgrade.code.repo = self.repo  # his code upgrades work on a throwaway repository here
+        self.clock = Clock()
+        self.ai.ideas._clock = self.clock
+        self.asked = []
+        self.answer = True
+
+        def confirm(name, shown, verdict):
+            self.asked.append((name, shown))
+            return self.answer
+
+        self.ai.confirm = confirm
+        for _ in range(MISSING_AT):
+            self.ai.ideas.missing_tool("play_music")
+        self.ai.llm_client = ScriptedLLM(say("By the way, I keep reaching for a music tool. Want me to build one?"))
+        self.ai.process_user_input("hi")  # he puts the idea to the user
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def write_steps(self):
+        return [
+            call_tool("upgrade_ideas", {"action": "accept", "idea": 1}, "a"),
+            call_tool("upgrade_code", {"action": "write", "path": "babyai/music.py", "content": "def play(song):\n    return 'playing ' + song\n"}, "b"),
+            call_tool("upgrade_code", {"action": "write", "path": "tests/test_music.py", "content": "import unittest\nfrom babyai.music import play\n\n\nclass T(unittest.TestCase):\n    def test_play(self):\n        self.assertEqual(play('x'), 'playing x')\n"}, "c"),
+            call_tool("upgrade_code", {"action": "test"}, "d"),
+            call_tool("upgrade_code", {"action": "apply"}, "e"),
+        ]
+
+    def test_a_yes_starts_the_change_and_he_carries_on_until_the_two_steps_that_ask(self):
+        head = sh(self.repo, "git", "rev-parse", "HEAD")
+        self.ai.llm_client = ScriptedLLM(*self.write_steps(), say("Built it, tested it, and it's live."))
+        self.ai.process_user_input("yes please")
+        self.assertEqual([name for name, _ in self.asked], ["upgrade_code", "upgrade_code"])  # the test run and the apply, nothing else
+        self.assertTrue((self.repo / "babyai" / "music.py").exists())  # applied, because the user said yes to those two
+        self.assertNotEqual(sh(self.repo, "git", "rev-parse", "HEAD"), head)
+        self.assertEqual(self.ai.ideas.state["ideas"][0]["status"], "accepted")
+
+    def test_if_the_user_declines_the_test_run_nothing_goes_live(self):
+        head = sh(self.repo, "git", "rev-parse", "HEAD")
+        self.answer = False
+        self.ai.llm_client = ScriptedLLM(*self.write_steps(), say("Okay, I'll leave it on the branch."))
+        self.ai.process_user_input("yes please")
+        self.assertEqual(sh(self.repo, "git", "rev-parse", "HEAD"), head)
+        self.assertFalse((self.repo / "babyai" / "music.py").exists())
+        self.assertIsNotNone(self.ai.upgrade.code.journal.load()["proposal"])  # still on its branch, waiting
+
+    def test_the_yes_itself_starts_a_branch_and_asks_nothing(self):
+        self.ai.llm_client = ScriptedLLM(call_tool("upgrade_ideas", {"action": "accept", "idea": 1}), say("On it."))
+        self.ai.process_user_input("yes")
+        self.assertEqual(self.asked, [])
+        proposal = self.ai.upgrade.code.journal.load()["proposal"]
+        self.assertTrue(proposal["branch"].startswith("self/build-a-play-music-tool"))
+        self.assertIsNone(proposal["tests"])  # nothing has been run
+        self.assertEqual(self.ai.ideas.state["ideas"][0]["branch"], proposal["branch"])
+        told = self.ai.llm_client.calls[1]["messages"][-1]["content"]
+        self.assertIn("begin now and don't ask again", told)
+        self.assertIn(proposal["branch"], told)
+
+    def test_the_next_message_still_reminds_him_to_carry_on(self):
+        self.ai.llm_client = ScriptedLLM(call_tool("upgrade_ideas", {"action": "accept", "idea": 1}), say("On it."), say("Still on it."))
+        self.ai.process_user_input("yes")
+        self.ai.process_user_input("how's it going")
+        self.assertIn("implementing it on a branch", self.ai.llm_client.calls[-1]["messages"][0]["content"])
+
+    def test_with_another_change_in_progress_the_yes_stands_and_nothing_second_is_started(self):
+        self.ai.upgrade.code.start("something the user asked for")
+        branch = self.ai.upgrade.code.journal.load()["proposal"]["branch"]
+        self.ai.llm_client = ScriptedLLM(call_tool("upgrade_ideas", {"action": "accept", "idea": 1}), say("After the current change."))
+        self.ai.process_user_input("yes")
+        self.assertEqual(self.ai.upgrade.code.journal.load()["proposal"]["branch"], branch)
+        self.assertEqual(self.ai.ideas.state["ideas"][0]["status"], "accepted")
+        self.assertIn("I couldn't start it just yet", self.ai.llm_client.calls[1]["messages"][-1]["content"])
+
+    def test_an_idea_not_yet_put_to_the_user_is_not_started(self):
+        for _ in range(MISSING_AT):
+            self.ai.ideas.missing_tool("other_tool")  # forms idea 2, which nobody has been told about
+        self.ai.llm_client = ScriptedLLM(call_tool("upgrade_ideas", {"action": "accept", "idea": 2}), say("I haven't asked yet."))
+        self.ai.process_user_input("yes")
+        self.assertIsNone(self.ai.upgrade.code.journal.load()["proposal"])
+        self.assertIn("haven't put idea #2 to the user yet", self.ai.llm_client.calls[1]["messages"][-1]["content"])
+
+
 class HisOwnIdeasTests(IdeasBase):
     def test_he_can_file_an_idea_of_his_own_and_is_told_to_tell_the_user(self):
         said = self.ideas.suggest("notes", "Keep a skill for the user's usual morning routine", "They ask for it most days.")
         self.assertIn("Noted as idea #1", said)
-        self.assertIn("tell the user about it", said)
-        self.assertIn("nothing changes until they say yes", said)
+        self.assertIn("Tell the user about it now, in this reply", said)
+        self.assertIn("Nothing changes until they say yes", said)
+        self.assertIn("call upgrade_ideas accept 1 and carry on implementing it yourself", said)
         (idea,) = self.ideas.state["ideas"]
         self.assertEqual((idea["source"], idea["status"], idea["kind"]), ("self", "open", "notes"))
         self.assertEqual(len(idea["shown"]), 1)  # he is telling the user now
@@ -602,14 +894,42 @@ class AgentIdeaTests(unittest.TestCase):
         self.assertFalse((self.root / "self" / "ideas.json").exists())
         off.start_idea_checks()  # does nothing, and does not fail
 
-    def test_a_tool_he_reaches_for_twice_becomes_an_idea_he_raises_at_the_next_message(self):
-        self.ai.llm_client = ScriptedLLM(call_tool("play_music", {}), say("I can't."), call_tool("play_music", {}), say("Still can't."), say("Hello."))
+    def test_a_tool_he_reaches_for_twice_becomes_an_idea_he_raises_in_that_very_reply(self):
+        self.ai.llm_client = ScriptedLLM(call_tool("play_music", {}), say("I can't."), call_tool("play_music", {}), say("Still can't - want me to build one?"), say("Hello."))
         self.ai.process_user_input("play something")
-        self.ai.process_user_input("again")
-        self.assertNotIn("thinking about for yourself", self.system_prompt())  # not before he has two to go on
+        calls = self.ai.llm_client.calls
+        self.assertNotIn("Build a play_music tool", json.dumps(calls[1]["messages"]))  # one try is nothing
+        reply = self.ai.process_user_input("again")
+        followup = self.ai.llm_client.calls[3]["messages"]
+        self.assertIn("Build a play_music tool", followup[-1]["content"])  # the idea reached him with the tool result...
+        self.assertIn("upgrade_ideas accept 1", followup[-1]["content"])
+        self.assertEqual(followup[-1]["role"], "tool")
+        self.assertEqual(reply, "Still can't - want me to build one?")  # ...and not the user's screen
+        self.assertEqual(self.ai.ideas.state["ideas"][0]["shown"] and len(self.ai.ideas.state["ideas"][0]["shown"]), 1)
         self.ai.process_user_input("hi")
-        self.assertIn("Build a play_music tool", self.system_prompt())
-        self.assertIn("upgrade_ideas accept 1", self.system_prompt())
+        self.assertNotIn("Build a play_music tool", self.system_prompt())  # once: not again while it is unanswered
+
+    def test_the_idea_is_never_part_of_what_the_user_is_shown_even_when_the_model_does_not_answer(self):
+        class Dead(ScriptedLLM):
+            def complete(self, messages, tools=None, stream=False):
+                if len(self.calls) >= 3:  # the follow-up after the second try fails
+                    self.calls.append({"messages": messages, "tools": tools})
+                    raise ConnectionError("down")
+                return super().complete(messages, tools, stream)
+
+        self.ai.llm_client = Dead(call_tool("play_music", {}), say("no"), call_tool("play_music", {}))
+        self.ai.process_user_input("play something")
+        shown = self.ai.process_user_input("again")
+        self.assertNotIn("Build a play_music tool", shown)
+        self.assertNotIn("thinking about for yourself", shown)
+
+    def test_a_model_that_cannot_use_tools_is_asked_about_in_the_message_that_makes_five(self):
+        self.ai._tools_ok = False
+        self.ai.llm_client = ScriptedLLM(*[say("ok")] * PLAIN_TURNS_AT)
+        for n in range(PLAIN_TURNS_AT):
+            self.ai.process_user_input(f"hello {n}")
+            raised = "Move to a model that can use tools" in self.system_prompt()
+            self.assertEqual(raised, n == PLAIN_TURNS_AT - 1, n)
 
     def test_a_message_that_did_not_reach_the_model_does_not_use_up_the_idea(self):
         self.ai.ideas.state["ideas"] = []
@@ -632,6 +952,16 @@ class AgentIdeaTests(unittest.TestCase):
         self.assertEqual(self.system_prompt().count("idea for getting better"), 0)  # the day's one idea was used by the first message
         first = self.ai.llm_client.calls[0]["messages"][0]["content"]
         self.assertEqual(first.count("idea for getting better"), 1)
+
+    def test_an_idea_raised_in_a_reply_that_never_came_is_not_used_up(self):
+        for _ in range(MISSING_AT - 1):
+            self.ai.ideas.missing_tool("play_music")
+        self.ai.llm_client = ScriptedLLM(call_tool("play_music", {}), ConnectionError("down"), say("Back again."))
+        self.ai.process_user_input("play something")  # the second try forms the idea; the follow-up fails
+        self.assertEqual(self.ai.ideas.state["ideas"][0]["shown"], [])
+        self.ai.process_user_input("hello")
+        self.assertIn("Build a play_music tool", self.system_prompt())
+        self.assertEqual(len(self.ai.ideas.state["ideas"][0]["shown"]), 1)
 
     def test_a_tool_that_crashes_is_counted(self):
         class Broken(Tool):

@@ -29,11 +29,17 @@ class UpgradeContext:
         self.version = VersionUpdates(self.repo, self.state)
         self.models = ModelUpgrades(assistant, config_path)
         self.notes = NoteBook(self.state)
-        # His own ideas for getting better (babyai/upgrade/ideas.py): he only suggests. [ideas] enabled = false turns it off.
+        # His own ideas for getting better (babyai/upgrade/ideas.py): he asks, and starts when you say yes. [ideas] enabled = false turns it off.
         ideas = config.get("ideas", {})
-        self.ideas = Ideas(self.state, busy=self._working, min_hours=ideas.get("min_hours", MIN_HOURS), fetch_updates=ideas.get("check_updates", True)) if ideas.get("enabled", True) else None
+        self.ideas = (
+            Ideas(self.state, busy=self._working, branch=self._branch, min_hours=ideas.get("min_hours", MIN_HOURS), fetch_updates=ideas.get("check_updates", True))
+            if ideas.get("enabled", True) else None
+        )
+
+    def _branch(self) -> str | None:
+        """The branch of a change of his own that is in progress (started and not applied or thrown away), if any."""
+        proposal = self.code.journal.load()["proposal"]
+        return proposal["branch"] if proposal and Path(proposal["path"]).is_dir() else None
 
     def _working(self) -> bool:
-        """Is a change of his own in progress (a branch he has started and not applied or thrown away)?"""
-        proposal = self.code.journal.load()["proposal"]
-        return bool(proposal and Path(proposal["path"]).is_dir())
+        return self._branch() is not None
