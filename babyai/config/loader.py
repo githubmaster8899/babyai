@@ -35,6 +35,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "memory": {
         "db_path": "~/.local/share/babyai/memory.db",
     },
+    # Start him when a certain USB drive is plugged in and close him when it is taken out (Linux; `python3 -m babyai.usbwatch pair`
+    # picks the drive and sets "drive" for you). Nothing on the drive is read or run: it is only a key.
+    "usb": {
+        "drive": "",  # e.g. "uuid:ABCD-1234" - empty until you pair a drive
+        "launch_if_present": True,  # the drive is already in when the watcher starts (e.g. at login): start him then too
+        "close_on_remove": True,
+        "grace_seconds": 3,  # the drive has to be gone this long before he is closed, so a flaky connection doesn't close him
+    },
     "voice": {
         "enabled": False,
         "wakeword": "baby",
