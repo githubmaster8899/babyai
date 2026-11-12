@@ -264,3 +264,54 @@ class HideAndSeek:
         if self.mode == self.HIDDEN:
             return self.timings.hide_fraction
         return 0.0
+
+
+class InputHistory:
+    """What was typed to her before, for the Up and Down keys in her box. Display-free.
+
+    Up goes back through it (the draft being typed is kept, and Down past the newest brings it back); editing a recalled
+    line makes it a new draft, so the next Up starts from the newest again. The same line twice in a row is kept once."""
+
+    def __init__(self, limit: int = 50) -> None:
+        self._limit = limit
+        self._items: list[str] = []
+        self._pos: int | None = None
+        self._saved = ""
+        self._shown = ""
+
+    def add(self, text: str) -> None:
+        text = text.strip()
+        if text and (not self._items or self._items[-1] != text):
+            self._items.append(text)
+            del self._items[: -self._limit]
+        self.reset()
+
+    def reset(self) -> None:
+        self._pos, self._saved, self._shown = None, "", ""
+
+    def older(self, draft: str) -> str | None:
+        """The line to show for Up, or None if there is nothing to go back to."""
+        if not self._items:
+            return None
+        if self._pos is None:
+            self._saved, self._pos = draft, len(self._items) - 1
+        else:
+            self._pos = max(0, self._pos - 1)
+        self._shown = self._items[self._pos]
+        return self._shown
+
+    def newer(self) -> str | None:
+        """The line to show for Down, or None if she is not in the history."""
+        if self._pos is None:
+            return None
+        if self._pos >= len(self._items) - 1:
+            self._pos, self._shown = None, self._saved
+            return self._saved
+        self._pos += 1
+        self._shown = self._items[self._pos]
+        return self._shown
+
+    def edited(self, text: str) -> None:
+        """The draft changed: if it is no longer the recalled line, it is a new draft."""
+        if self._pos is not None and text != self._shown:
+            self.reset()

@@ -38,3 +38,56 @@ class NeedsTypingBoxTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+try:
+    import tkinter as tk
+
+    _probe = tk.Tk()
+    _probe.destroy()
+    HAVE_TK = True
+except Exception:  # no tkinter, or no display
+    HAVE_TK = False
+
+
+@unittest.skipUnless(HAVE_TK, "needs tkinter and a display")
+class TypingBoxHistoryKeys(unittest.TestCase):
+    def make(self, **options):
+        from babyai.ui.typing_box import TypingBox
+
+        root = tk.Tk()
+        self.addCleanup(root.destroy)
+        colors = dict(bg="#000000", field="#111111", text="#ffffff", accent="#ff00ff", dim="#888888")
+        box = TypingBox(root, "Talk", 40, lambda _t: None, lambda: None, lambda: None, colors, **options)
+        box.window.update()
+        box.entry.focus_force()
+        box.window.update()
+        return box
+
+    def test_up_and_down_are_reported_when_asked_for(self):
+        seen = []
+        box = self.make(on_history=seen.append)
+        box.entry.event_generate("<Up>", when="now")
+        box.entry.event_generate("<Down>", when="now")
+        box.window.update()
+        self.assertEqual(seen, [-1, 1])
+
+    def test_without_a_callback_the_keys_are_not_taken(self):
+        box = self.make()
+        self.assertEqual(box.entry.bind("<Up>"), "")
+        self.assertEqual(box.entry.bind("<Down>"), "")
+
+    def test_set_text_replaces_the_text_and_tells_the_overlay(self):
+        changed = []
+        from babyai.ui.typing_box import TypingBox
+
+        root = tk.Tk()
+        self.addCleanup(root.destroy)
+        colors = dict(bg="#000000", field="#111111", text="#ffffff", accent="#ff00ff", dim="#888888")
+        box = TypingBox(root, "Talk", 40, changed.append, lambda: None, lambda: None, colors)
+        box.set_text("hello")
+        self.assertEqual(box._var.get(), "hello")
+        self.assertEqual(changed, ["hello"])
+        self.assertEqual(box.entry.index("insert"), 5)
+        box.set_text("x" * 100)  # the box's own limit still applies
+        self.assertEqual(len(box._var.get()), 40)

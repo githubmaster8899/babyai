@@ -27,6 +27,7 @@ class TypingBox:
         on_cancel: Callable[[], None],
         colors: Mapping[str, str],
         font: object = None,
+        on_history: Callable[[int], None] | None = None,
     ) -> None:
         self._on_change = on_change
         self.window = tk.Toplevel(root)
@@ -52,6 +53,9 @@ class TypingBox:
         self.entry.bind("<Return>", lambda _event: (on_send(), "break")[1])
         self.entry.bind("<KP_Enter>", lambda _event: (on_send(), "break")[1])
         self.entry.bind("<Escape>", lambda _event: (on_cancel(), "break")[1])
+        if on_history is not None:  # Up goes back through what was said before (-1), Down forward again (+1)
+            self.entry.bind("<Up>", lambda _event: (on_history(-1), "break")[1])
+            self.entry.bind("<Down>", lambda _event: (on_history(1), "break")[1])
         self.window.protocol("WM_DELETE_WINDOW", on_cancel)
 
     def _changed(self, *_args) -> None:
@@ -60,6 +64,11 @@ class TypingBox:
             text = text[: self._limit]
             self._var.set(text)  # Tk does not run this trace again for a change made inside it
         self._on_change(text)
+
+    def set_text(self, text: str) -> None:
+        """Replace what is in the box (and the bubble, through the change callback), cursor at the end."""
+        self._var.set(text)
+        self.entry.icursor("end")
 
     def place_above(self, centre_x: int, bottom_y: int) -> None:
         """Put the box centred on ``centre_x`` with its bottom edge at ``bottom_y`` (screen pixels), kept on the screen."""

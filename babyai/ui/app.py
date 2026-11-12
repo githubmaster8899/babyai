@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING
 from babyai.ui.behavior import (
     BubbleTimer,
     HideAndSeek,
+    InputHistory,
     SleepClock,
     cursor_line,
     eye_offset,
@@ -58,6 +59,7 @@ from babyai.ui.behavior import (
 from babyai.ui.capri_body import CLIPS, Animator, PetDetector, letters_revealed, mouth_cell, pet_line
 from babyai.ui.persona import apply_character
 from babyai.ui.sounds import SoundPlayer
+from babyai.ui.summon import SummonServer, socket_path
 from babyai.ui.sprites import DEFAULT_SCALE, SpriteBank
 from babyai.ui.typing_box import TypingBox
 from babyai.ui.xshape import XShape
@@ -257,6 +259,10 @@ class BabyAIDesktopWindow:
         self._shape_key: tuple | None = None
         ui = (getattr(assistant, "config", None) or {}).get("ui", {})
         self._sounds = SoundPlayer.from_config(ui)  # little sounds: off unless [ui] sounds = true
+        self._hidden = False  # sent away with `python3 -m babyai --toggle` (see summon.py)
+        self._summons: queue.Queue[str] = queue.Queue()
+        self._summon_server: SummonServer | None = None
+        self._history = InputHistory()  # what was typed to her, for the Up and Down keys
         self._typing_via_box = needs_typing_box(ui.get("typing", "auto"), self._windowing, os.environ)
         self._typing_box: TypingBox | None = None  # catches the keys when the borderless window can't (see typing_box.py)
 
@@ -270,6 +276,9 @@ class BabyAIDesktopWindow:
         self._set_reply(f"Hi, I'm {self._name}. Pencil to type, wave to talk.")
         self._poll_results()
         self._tick()
+        if ui.get("summon", True) is True:
+            server = SummonServer(socket_path(), self._summons)
+            self._summon_server = server if server.start() else None  # (None: another overlay already answers, or no place for the socket)
 
         if not self.transparent:
             self.root.update()  # map the window first
@@ -574,6 +583,8 @@ class BabyAIDesktopWindow:
     def _wake(self, chime: bool = True) -> None:
         """A click, key press or reply counts as activity: wake up and restart the idle timer.
         (``chime=False`` when what woke her has a sound of its own: a reply, a question.)"""
+        if self._hidden:  # whatever woke her (a reply, a question) brings her back
+            self._show()
         now = time.monotonic()
         woke = self._clock.touch(now)
         if woke and chime:
@@ -874,7 +885,7 @@ class BabyAIDesktopWindow:
         try:
             box = TypingBox(
                 self.root, f"Talk to {self._assistant_name()}", MAX_DRAFT, self._typed_in_box, self._send, self._close_input,
-                dict(bg=PANEL_BG, field=BUBBLE_FILL, text=REPLY_FG, accent=NEON, dim=DIM), self.font_echo,
+                dict(bg=PANEL_BG, field=BUBBLE_FILL, text=REPLY_FG, accent=NEON, dim=DIM), self.font_echo, self._recall,
             )
             left, top, right, _bottom = self._bubble_box or (BUBBLE_L, 0, BUBBLE_R, 0)
             box.place_above(self.root.winfo_rootx() + (left + right) // 2, self.root.winfo_rooty() + top - 8)
@@ -897,6 +908,7 @@ class BabyAIDesktopWindow:
             return
         self._wake()
         self._draft = text
+        self._history.edited(text)
         self._render_bubble()
 
     def _on_key(self, event) -> str | None:
@@ -908,11 +920,20 @@ class BabyAIDesktopWindow:
                 self._answer_confirm(False)
             return "break"
         if not self._input_open:
+            if event.keysym == "Escape" or ((event.state & 0x4) and event.keysym == "period"):  # Esc or Ctrl+. : that's enough of the reply
+                if self._busy or self._bubble_box is None:
+                    return None
+                self._hide_bubble()
+                return "break"
             return None
         if event.keysym in ("Return", "KP_Enter"):
             self._send()
         elif event.keysym == "Escape":
             self._close_input()
+        elif event.keysym == "Up":
+            self._recall(-1)
+        elif event.keysym == "Down":
+            self._recall(1)
         elif event.keysym == "BackSpace":
             self._draft = self._draft[:-1]
         elif (event.state & 0x4) and event.keysym.lower() == "v":  # Ctrl+V
@@ -925,8 +946,19 @@ class BabyAIDesktopWindow:
             self._draft += event.char
         else:
             return None
+        self._history.edited(self._draft)
         self._render_bubble()
         return "break"
+
+    def _recall(self, direction: int) -> None:
+        """Up (-1) / Down (+1) in the box: what was said to her before."""
+        text = self._history.older(self._draft) if direction < 0 else self._history.newer()
+        if text is None:
+            return
+        self._draft = text[:MAX_DRAFT]
+        if self._typing_box is not None:
+            self._typing_box.set_text(self._draft)
+        self._render_bubble()
 
     def _send(self) -> None:
         text = self._draft.strip()
@@ -942,6 +974,7 @@ class BabyAIDesktopWindow:
             return
         self._busy = True
         self._echo = text
+        self._history.add(text)
         self._set_reply("", thinking=True)
         threading.Thread(target=self._ask_assistant, args=(text,), daemon=True).start()
 
@@ -970,7 +1003,41 @@ class BabyAIDesktopWindow:
                 pass
         elif time.monotonic() > self._confirm["deadline"]:
             self._answer_confirm(False)  # nobody answered: that is a no
+        self._handle_summons()
         self._poll_id = self.root.after(100, self._poll_results)
+
+    def _handle_summons(self) -> None:
+        try:
+            while True:
+                word = self._summons.get_nowait()
+                if word == "show" or (word == "toggle" and self._hidden):
+                    self._show()
+                    self._wake()
+                    self.canvas.focus_force()
+                elif word in ("hide", "toggle"):
+                    self._hide()
+        except queue.Empty:
+            pass
+
+    def _hide(self) -> None:
+        """Send her away until she is summoned again, or has something to say. Not while she is waiting for a yes or no."""
+        if self._hidden or self._confirm is not None:
+            return
+        if self._input_open:
+            self._close_input()
+        self._hidden = True
+        self.root.withdraw()
+
+    def _show(self) -> None:
+        if not self._hidden:
+            return
+        self._hidden = False
+        self.root.deiconify()
+        try:
+            self.root.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        self.root.lift()
 
     def _on_mic(self) -> None:
         if self._busy or self._confirm is not None:
@@ -1100,6 +1167,9 @@ class BabyAIDesktopWindow:
             self.menu.grab_release()
 
     def close(self, _event=None) -> None:
+        if self._summon_server is not None:
+            self._summon_server.stop()
+            self._summon_server = None
         self._hide_typing_box()
         if self._shape is not None:
             self._shape.close()

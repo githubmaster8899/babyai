@@ -84,6 +84,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "peek_for_s": 2.5,  # how long one peek lasts
         "sounds": False,  # little sounds (wake chime, reply blip, a knock when she asks permission, a chirp when petted); needs pw-play, paplay or aplay
         "sound_volume": 0.4,  # 0 to 1
+        "summon": True,  # listen for `python3 -m babyai --toggle|--show|--hide` (bind --toggle to a keyboard shortcut to bring her up or send her away)
     },
 }
 

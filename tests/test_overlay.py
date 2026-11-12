@@ -80,8 +80,11 @@ class OverlayTests(unittest.TestCase):
         self.sprites_module = sprites
         self._old_dir = sprites.SPRITE_DIR
         self._old_cache = os.environ.get("XDG_CACHE_HOME")
+        self._old_runtime = os.environ.get("XDG_RUNTIME_DIR")
         sprites.SPRITE_DIR = type(sprites.SPRITE_DIR)(self.sprites)
         os.environ["XDG_CACHE_HOME"] = os.path.join(self.dir.name, "cache")
+        self._runtime = tempfile.TemporaryDirectory(dir="/tmp")  # the summon socket goes here, never in the real runtime folder
+        os.environ["XDG_RUNTIME_DIR"] = self._runtime.name
         self.windows = []
 
     def tearDown(self):
@@ -95,6 +98,11 @@ class OverlayTests(unittest.TestCase):
             os.environ.pop("XDG_CACHE_HOME", None)
         else:
             os.environ["XDG_CACHE_HOME"] = self._old_cache
+        if self._old_runtime is None:
+            os.environ.pop("XDG_RUNTIME_DIR", None)
+        else:
+            os.environ["XDG_RUNTIME_DIR"] = self._old_runtime
+        self._runtime.cleanup()
 
     def window(self, **ui):
         from babyai.ui.app import NEON, BabyAIDesktopWindow
@@ -261,17 +269,50 @@ class OverlayTests(unittest.TestCase):
         win._presence_tick()  # awake before and after
         self.assertEqual(win._sounds.played, ["wake"])
 
-    def test_asking_permission_knocks(self):
+    # ---- summon / hide, Esc, history
+
+    def test_hide_show_and_toggle_from_outside(self):
+        from babyai.ui.summon import send, socket_path
+
+        win = self.window()
+        self.pump(win, 0.2)
+        self.assertEqual(win.root.state(), "normal")
+        self.assertEqual(send("hide", socket_path()), "ok")
+        self.assertTrue(self.pump(win, 3.0, until=lambda: win.root.state() == "withdrawn"))
+        self.assertEqual(send("toggle", socket_path()), "ok")
+        self.assertTrue(self.pump(win, 3.0, until=lambda: win.root.state() == "normal"))
+        self.assertEqual(send("toggle", socket_path()), "ok")
+        self.assertTrue(self.pump(win, 3.0, until=lambda: win.root.state() == "withdrawn"))
+        self.assertEqual(send("show", socket_path()), "ok")
+        self.assertTrue(self.pump(win, 3.0, until=lambda: win.root.state() == "normal"))
+        self.assertEqual(send("show", socket_path()), "ok")  # already up: no harm
+        self.pump(win, 0.3)
+        self.assertEqual(win.root.state(), "normal")
+
+    def test_a_reply_while_she_is_hidden_brings_her_back(self):
+        win = self.window()
+        win._hide()
+        self.assertEqual(win.root.state(), "withdrawn")
+        win._results.put("you have mail")
+        self.assertTrue(self.pump(win, 3.0, until=lambda: win.root.state() == "normal"))
+        self.assertIn("you have mail", win._reply)
+
+    def test_a_question_while_she_is_hidden_brings_her_back_and_she_cannot_be_hidden_while_asking(self):
         win = self.window()
         win._sounds = Recorder()
         win._clock.sleep()
+        win._hide()
         answers = []
         worker = threading.Thread(target=lambda: answers.append(win._confirm_from_worker("write_file", {}, {"risk_level": "MEDIUM"})))
         worker.start()
         self.assertTrue(self.pump(win, 3.0, until=lambda: win._confirm is not None))
         self.assertEqual(win._sounds.played, ["ask"])
-        win._answer_confirm(False)
+        self.assertEqual(win.root.state(), "normal")
+        win._hide()  # the shortcut pressed while she waits for a yes or no
+        self.assertEqual(win.root.state(), "normal")
+        win._answer_confirm(True)
         worker.join(3)
+        self.assertEqual(answers, [True])
 
     def test_being_petted_chirps(self):
         win = self.window()
@@ -284,6 +325,126 @@ class OverlayTests(unittest.TestCase):
         for i in range(10):
             win._on_motion(SimpleNamespace(x=x + (5 if i % 2 else -5), y=y))
         self.assertEqual(win._sounds.played, ["pet"])
+
+    def test_hiding_her_closes_the_box_she_was_being_typed_to_in(self):
+        win = self.window(typing="box")
+        win._open_input()
+        self.assertIsNotNone(win._typing_box)
+        win._hide()
+        self.assertIsNone(win._typing_box)
+        self.assertFalse(win._input_open)
+
+    def test_the_socket_goes_away_when_she_is_closed_and_summon_can_be_turned_off(self):
+        from babyai.ui.summon import send, socket_path
+
+        win = self.window()
+        self.assertEqual(send("show", socket_path()), "ok")
+        win.close()
+        self.assertIsNone(send("show", socket_path()))
+        off = self.window(summon=False)
+        self.assertIsNone(off._summon_server)
+        self.assertIsNone(send("show", socket_path()))
+
+    def test_a_second_overlay_leaves_the_summon_to_the_first(self):
+        from babyai.ui.summon import send, socket_path
+
+        first = self.window()
+        second = self.window()
+        self.assertIsNotNone(first._summon_server)
+        self.assertIsNone(second._summon_server)
+        self.assertEqual(send("hide", socket_path()), "ok")
+        self.assertTrue(self.pump(first, 3.0, until=lambda: first.root.state() == "withdrawn"))
+        self.assertEqual(second.root.state(), "normal")
+
+    def test_escape_puts_the_reply_away_and_ctrl_period_too(self):
+        for event in (SimpleNamespace(keysym="Escape", char="", state=0), SimpleNamespace(keysym="period", char=".", state=0x4)):
+            win = self.window()
+            win._set_reply("a fairly long reply that is being said")
+            self.pump(win, 0.3)
+            self.assertIsNotNone(win._bubble_box)
+            self.assertEqual(win._on_key(event), "break")
+            self.assertIsNone(win._bubble_box)
+            self.assertTrue(win._bubble_hidden)
+
+    def test_a_plain_period_or_escape_with_nothing_to_dismiss_is_left_alone(self):
+        win = self.window()
+        win._hide_bubble()
+        self.assertIsNone(win._on_key(SimpleNamespace(keysym="Escape", char="", state=0)))
+        win._set_reply("hello")
+        self.assertIsNone(win._on_key(SimpleNamespace(keysym="period", char=".", state=0)))
+        self.assertIsNotNone(win._bubble_box)
+
+    def test_escape_does_not_pretend_to_stop_her_thinking(self):
+        win = self.window()
+        win._busy = True
+        win._set_reply("", thinking=True)
+        self.assertIsNone(win._on_key(SimpleNamespace(keysym="Escape", char="", state=0)))
+        self.assertTrue(win._thinking)
+
+    def test_up_and_down_in_her_bubble_go_through_what_was_said(self):
+        win = self.window()
+        for text in ("first thing", "second thing"):
+            win._history.add(text)
+        win._input_open = True
+        win._draft = "half"
+        press = lambda key: win._on_key(SimpleNamespace(keysym=key, char="", state=0))
+        self.assertEqual(press("Up"), "break")
+        self.assertEqual(win._draft, "second thing")
+        press("Up")
+        self.assertEqual(win._draft, "first thing")
+        press("Down")
+        press("Down")
+        self.assertEqual(win._draft, "half", "back to what was being typed")
+        press("Up")
+        win._on_key(SimpleNamespace(keysym="x", char="x", state=0))  # editing it makes it a new draft
+        self.assertEqual(win._draft, "second thingx")
+        press("Up")
+        self.assertEqual(win._draft, "second thing")
+
+    def test_what_was_sent_is_remembered(self):
+        win = self.window()
+        win._submit("remember me")
+        self.assertTrue(self.pump(win, 3.0, until=lambda: not win._busy))
+        win._open_input()
+        win._on_key(SimpleNamespace(keysym="Up", char="", state=0))
+        self.assertEqual(win._draft, "remember me")
+
+    def test_up_and_down_in_the_typing_box(self):
+        win = self.window(typing="box")
+        win._history.add("old one")
+        win._open_input()
+        box = win._typing_box
+        self.assertIsNotNone(box)
+        win._recall(-1)
+        self.assertEqual(box._var.get(), "old one")
+        self.assertEqual(win._draft, "old one")
+        box._var.set("old one, changed")
+        self.assertEqual(win._draft, "old one, changed")
+        win._recall(1)  # nothing newer: the box keeps what is in it
+        self.assertEqual(box._var.get(), "old one, changed")
+
+    def test_the_box_keys_reach_her_and_editing_a_recalled_line_starts_again_from_the_newest(self):
+        win = self.window(typing="box")
+        win._history.add("a")
+        win._history.add("b")
+        win._open_input()
+        box = win._typing_box
+        box.entry.focus_force()
+        box.window.update()
+        box.entry.event_generate("<Up>", when="now")
+        box.window.update()
+        self.assertEqual(box._var.get(), "b")
+        box._var.set("b!")  # typed over the recalled line: a new draft
+        box.entry.event_generate("<Up>", when="now")
+        box.window.update()
+        self.assertEqual(box._var.get(), "b")
+        box.entry.event_generate("<Up>", when="now")
+        box.window.update()
+        self.assertEqual(box._var.get(), "a")
+        box.entry.event_generate("<Down>", when="now")
+        box.entry.event_generate("<Down>", when="now")
+        box.window.update()
+        self.assertEqual(box._var.get(), "b!")
 
     def test_pointer_motion_is_ignored_while_she_is_asleep(self):
         win = self.window()
