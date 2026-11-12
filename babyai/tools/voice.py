@@ -1,3 +1,4 @@
+from babyai import screen
 from babyai.tools.base import Tool, ToolResult
 
 
@@ -19,10 +20,15 @@ class ListenTool(Tool):
 
 class CaptureScreenTool(Tool):
     name = "capture_screen"
-    description = "Capture a screenshot from the display. This is a high-risk action."
+    description = "Save a screenshot of the screen to a file the user names. This is a high-risk action."
 
     def invoke(self, path: str = "screenshot.png") -> ToolResult:
-        return ToolResult(False, "Screen capture is unavailable in this environment.", {"path": path})
+        saved = screen.capture_to(path)
+        if saved is None:
+            return ToolResult(False, "I couldn't take a screenshot. On Wayland I need grim or spectacle; on X11 scrot or "
+                                     "ImageMagick's import. The desktop may also be refusing screen capture.",
+                              {"path": path})
+        return ToolResult(True, f"Saved a screenshot to {saved}.", {"path": saved})
 
 
 class GetClipboardTool(Tool):

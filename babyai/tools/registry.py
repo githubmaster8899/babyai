@@ -16,6 +16,7 @@ from babyai.tools.interaction import AskUserTool, NotifyTool
 from babyai.tools.habits import HabitProfileTool
 from babyai.tools.memory import ForgetMemoryTool, RecallMemoryTool, RememberFactTool
 from babyai.tools.personality import PersonalityTool
+from babyai.tools.screen import LookAtScreenTool
 from babyai.tools.shell import RunShellTool
 from babyai.tools.system import GetSystemInfoTool, ManageProcessesTool
 from babyai.tools.upgrade import UpgradeCodeTool, UpgradeIdeasTool, UpgradeModelTool, UpgradeNotesTool, UpgradeVersionTool
@@ -68,6 +69,7 @@ def build_default_registry(memory_store=None, config: dict[str, Any] | None = No
         SpeakTool(memory_store, config),
         ListenTool(memory_store, config),
         CaptureScreenTool(memory_store, config),
+        LookAtScreenTool(memory_store, config),
         GetClipboardTool(memory_store, config),
         SetClipboardTool(memory_store, config),
         GetActiveWindowTool(memory_store, config),

@@ -14,6 +14,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "model": "llama3.1:8b",  # an Ollama tag that supports tools; run `ollama list` to see what you have
         "api_key": "",
         "timeout": 120,  # seconds; the first request can be slow while Ollama loads the model
+        "vision_model": "",  # for looking at the screen (llava, qwen2.5vl, ...): empty means he says he needs one
     },
     "agent": {
         "name": "BabyAI",

@@ -1,4 +1,6 @@
+import base64
 import json
+import mimetypes
 import urllib.error
 import urllib.request
 from typing import Any
@@ -40,6 +42,33 @@ class LLMClient:
         if tools:
             payload["tools"] = tools
 
+        body = self._post(payload)
+        if not stream:
+            return json.loads(body)
+
+        return self._parse_stream_response(body)
+
+    def complete_vision(self, prompt: str, image_path: str, model: str | None = None) -> dict[str, Any]:
+        """Ask a vision model about a local image. ``model`` overrides this client's text model (Ollama only
+        accepts an image on a model that was built for it); the image goes as a data URI, so it never leaves
+        the machine except to the server this client already points at."""
+        try:
+            with open(image_path, "rb") as handle:
+                raw = handle.read()
+        except OSError as exc:
+            raise RuntimeError(f"Could not read the screenshot: {exc}") from exc
+        mime = mimetypes.guess_type(image_path)[0] or "image/png"
+        message = {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"}},
+            ],
+        }
+        payload = {"model": model or self.model, "messages": [message], "stream": False}
+        return json.loads(self._post(payload))
+
+    def _post(self, payload: dict[str, Any]) -> str:
         request = urllib.request.Request(
             self.base_url + "/chat/completions",
             data=json.dumps(payload).encode("utf-8"),
@@ -49,7 +78,7 @@ class LLMClient:
 
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                body = response.read().decode("utf-8")
+                return response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             try:
                 detail = _error_detail(exc.read().decode("utf-8", "replace"))
@@ -60,11 +89,6 @@ class LLMClient:
             ) from exc
         except Exception as exc:
             raise RuntimeError(f"LLM request failed: {exc}") from exc
-
-        if not stream:
-            return json.loads(body)
-
-        return self._parse_stream_response(body)
 
     def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}

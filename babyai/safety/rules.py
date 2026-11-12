@@ -30,6 +30,7 @@ TOOL_RISK_LEVELS = {
     "speak": RiskLevel.LOW,
     "listen": RiskLevel.LOW,
     "capture_screen": RiskLevel.CRITICAL,
+    "look_at_screen": RiskLevel.CRITICAL,  # a full-screen picture is the most private thing he can look at
     "get_clipboard": RiskLevel.HIGH,
     "set_clipboard": RiskLevel.HIGH,
     "get_active_window": RiskLevel.MEDIUM,  # a window title can contain anything; read only, never stored
