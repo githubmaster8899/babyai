@@ -11,8 +11,10 @@ _JSON_TYPE_WORDS = {"bool": "boolean", "int": "integer", "float": "number", "str
 def _json_type(annotation: Any) -> str:
     """Map a parameter annotation (a type, or a string under ``from __future__ import annotations``)
     to a JSON-schema type name. Anything unrecognised is offered to the model as a string."""
-    text = annotation if isinstance(annotation, str) else getattr(annotation, "__name__", str(annotation))
-    match = re.search(r"\b(bool|int|float|str)\b", str(text))
+    # ``str()`` rather than ``__name__``: on Python 3.14 ``int | None`` is a ``typing.Union`` whose
+    # ``__name__`` is "Union", while its text still names the real type.
+    text = annotation if isinstance(annotation, str) else str(annotation)
+    match = re.search(r"\b(bool|int|float|str)\b", text)
     return _JSON_TYPE_WORDS[match.group(1)] if match else "string"
 
 
