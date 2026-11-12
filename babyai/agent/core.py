@@ -10,6 +10,7 @@ from babyai.config.loader import load_config
 from babyai.llm.client import LLMClient
 from babyai.habits import Habits
 from babyai.memory.store import MemoryStore
+from babyai.personality import Personality, defaults_from_config
 from babyai.safety.gate import SafetyGate
 from babyai.tools.registry import build_default_registry
 from babyai.upgrade import UpgradeContext
@@ -67,11 +68,24 @@ class BabyAI:
         habit_config = self.config.get("habits", {})
         habit_dir = habit_config.get("dir") or os.path.join(os.path.dirname(os.path.expanduser(memory_path)), "habits")
         self.habits = Habits(habit_dir) if habit_config.get("enabled", True) else None
-        self.tool_registry = build_default_registry(memory_store=self.memory, config=self.config, upgrade=self.upgrade, habits=self.habits)
+        # How he sounds: four sliders the user can move, kept on their computer; like habits they are a hint for his prompt,
+        # never a permission - the safety gate does not read them. [personality] enabled = false turns it off.
+        personality_config = self.config.get("personality", {})
+        personality_dir = personality_config.get("dir") or os.path.join(
+            os.path.dirname(os.path.expanduser(memory_path)), "personality")
+        self.personality = (
+            Personality(personality_dir, defaults_from_config(personality_config))
+            if personality_config.get("enabled", True) else None
+        )
+        self.tool_registry = build_default_registry(
+            memory_store=self.memory, config=self.config, upgrade=self.upgrade, habits=self.habits,
+            personality=self.personality,
+        )
         # He thinks for himself about how to get better and suggests it - he only suggests (babyai/upgrade/ideas.py). [ideas] enabled = false turns it off.
         self.ideas = self.upgrade.ideas if self.upgrade is not None else None
         blocks = [
             block for block in (
+                self.personality.prompt_block if self.personality is not None else None,
                 self.upgrade.notes.prompt_block if self.upgrade is not None else None,
                 self.ideas.prompt_block if self.ideas is not None else None,
                 self.habits.prompt_block if self.habits is not None else None,

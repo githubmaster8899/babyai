@@ -32,6 +32,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "enabled": True,  # he learns your habits (what you ask, when, how you like replies); counts only, you can see/pause/wipe them
         # "dir" is a habits folder next to the memory database unless you set it here
     },
+    "personality": {
+        "enabled": True,  # four manner sliders (1..5) that shape how he talks; you can change them by asking, and they are
+        # kept in one file next to the memory database. The safety gate never reads them.
+        "playfulness": 3,
+        "warmth": 3,
+        "curiosity": 3,
+        "verbosity": 3,
+        # "dir" is a personality folder next to the memory database unless you set it here
+    },
     "memory": {
         "db_path": "~/.local/share/babyai/memory.db",
     },

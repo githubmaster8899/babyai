@@ -4,9 +4,9 @@ from babyai.tools.registry import build_default_registry
 
 
 class ToolRegistryTests(unittest.TestCase):
-    def test_registry_has_21_tools(self):
+    def test_registry_has_22_tools(self):
         registry = build_default_registry()
-        self.assertEqual(len(registry.tools), 21)
+        self.assertEqual(len(registry.tools), 22)
 
     def test_registry_names_match_expected(self):
         registry = build_default_registry()
@@ -32,6 +32,7 @@ class ToolRegistryTests(unittest.TestCase):
             "capture_screen",
             "get_clipboard",
             "set_clipboard",
+            "get_active_window",
         }
         self.assertSetEqual(set(registry.tools.keys()), expected)
 

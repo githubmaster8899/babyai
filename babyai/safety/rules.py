@@ -32,12 +32,13 @@ TOOL_RISK_LEVELS = {
     "capture_screen": RiskLevel.CRITICAL,
     "get_clipboard": RiskLevel.HIGH,
     "set_clipboard": RiskLevel.HIGH,
+    "get_active_window": RiskLevel.MEDIUM,  # a window title can contain anything; read only, never stored
 }
 
 
-# The self-upgrade tools (babyai/tools/upgrade.py) take an ``action``, and what it does decides how risky the call is.
-# Anything that changes him or his machine is the user's call whatever the safety level (see SafetyGate.check);
-# looking, and working on a branch that is not live, is not.
+# Tools that take an ``action`` (self-upgrade, habit profile, personality sliders): what it does decides how risky
+# the call is. Anything that changes him or his machine is the user's call whatever the safety level (see
+# SafetyGate.check); looking, and working on a branch that is not live, is not.
 UPGRADE_ACTION_RISK: dict[str, dict[str, RiskLevel]] = {
     "upgrade_code": {
         "status": RiskLevel.LOW, "start": RiskLevel.LOW, "write": RiskLevel.LOW, "replace": RiskLevel.LOW,
@@ -58,6 +59,9 @@ UPGRADE_ACTION_RISK: dict[str, dict[str, RiskLevel]] = {
         "pause": RiskLevel.MEDIUM, "resume": RiskLevel.MEDIUM,
     },
     "habit_profile": {"show": RiskLevel.LOW, "pause": RiskLevel.MEDIUM, "resume": RiskLevel.MEDIUM, "forget": RiskLevel.HIGH},
+    "personality": {  # how he sounds: looking is free, moving a slider changes him, so it is the user's call
+        "show": RiskLevel.LOW, "about": RiskLevel.LOW, "set": RiskLevel.MEDIUM, "reset": RiskLevel.MEDIUM,
+    },
     "upgrade_notes": {
         "show": RiskLevel.LOW, "show_skill": RiskLevel.LOW,
         "add_note": RiskLevel.MEDIUM, "remove_note": RiskLevel.MEDIUM,
