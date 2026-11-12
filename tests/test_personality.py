@@ -5,7 +5,7 @@ import unittest
 
 from babyai.agent.core import BabyAI
 from babyai.memory.store import MemoryStore
-from babyai.personality import MAX_VALUE, Personality, clamp, defaults_from_config
+from babyai.personality import Personality, clamp, defaults_from_config
 from babyai.safety.gate import SafetyGate
 from babyai.tools.personality import PersonalityTool
 from babyai.tools.registry import build_default_registry
@@ -51,10 +51,11 @@ class PersonalityFileTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             Personality(self.dir.name).set("loudness", 3)
 
-    def test_value_is_clamped_to_the_slider_range(self):
+    def test_value_stays_inside_the_slider_range(self):
         personality = Personality(self.dir.name)
-        personality.set("playfulness", 99)
-        self.assertEqual(personality.values()["playfulness"], MAX_VALUE)
+        with self.assertRaises(ValueError):
+            personality.set("playfulness", 99)
+        self.assertEqual(personality.values()["playfulness"], 3)
         self.assertEqual(clamp("loud", default=2), 2)
         self.assertEqual(clamp(True, default=2), 2)
 

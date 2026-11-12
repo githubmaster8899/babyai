@@ -156,13 +156,12 @@ class Personality:
         name = (slider or "").strip().lower()
         if name not in SLIDERS:
             raise ValueError(f"{slider!r} isn't one of my sliders. They are: {', '.join(SLIDERS)}.")
-        number = clamp(value, DEFAULT_VALUE) if isinstance(value, int) and not isinstance(value, bool) else None
-        if number is None:
+        if isinstance(value, bool) or not isinstance(value, int) or not MIN_VALUE <= value <= MAX_VALUE:
             raise ValueError(f"Give {name} a whole number from {MIN_VALUE} to {MAX_VALUE}.")
         with self._lock:
-            self.state["values"][name] = number
+            self.state["values"][name] = value
             self._save()
-        return f"{name} is now {number}/{MAX_VALUE}: {SLIDERS[name][number - 1]}"
+        return f"{name} is now {value}/{MAX_VALUE}: {SLIDERS[name][value - 1]}"
 
     def reset(self) -> str:
         with self._lock:
