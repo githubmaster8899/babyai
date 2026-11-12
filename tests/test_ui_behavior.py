@@ -5,7 +5,7 @@ import unittest
 
 from babyai.config.loader import DEFAULT_CONFIG, load_config
 from babyai.ui import behavior
-from babyai.ui.behavior import BubbleTimer, SleepClock, UiTimings, cursor_line, eye_offset, scroll_top, thinking_label, timings_from_config
+from babyai.ui.behavior import BubbleTimer, InputHistory, SleepClock, UiTimings, cursor_line, eye_offset, scroll_top, thinking_label, timings_from_config
 
 
 class ThinkingLabelTests(unittest.TestCase):
@@ -271,3 +271,73 @@ class BubbleSettingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InputHistoryTests(unittest.TestCase):
+    def history(self, *lines):
+        history = InputHistory()
+        for line in lines:
+            history.add(line)
+        return history
+
+    def test_up_goes_back_one_line_at_a_time_and_stops_at_the_oldest(self):
+        history = self.history("one", "two", "three")
+        self.assertEqual([history.older("") for _ in range(5)], ["three", "two", "one", "one", "one"])
+
+    def test_down_comes_forward_and_ends_on_the_draft_that_was_being_typed(self):
+        history = self.history("one", "two")
+        history.older("half a thought")
+        history.older("half a thought")
+        self.assertEqual(history.newer(), "two")
+        self.assertEqual(history.newer(), "half a thought")
+        self.assertIsNone(history.newer(), "nothing newer than the draft")
+
+    def test_nothing_to_recall_changes_nothing(self):
+        history = InputHistory()
+        self.assertIsNone(history.older("draft"))
+        self.assertIsNone(history.newer())
+
+    def test_down_without_having_gone_up_does_nothing(self):
+        self.assertIsNone(self.history("one").newer())
+
+    def test_editing_a_recalled_line_makes_it_a_new_draft(self):
+        history = self.history("one", "two", "three")
+        history.older("")
+        history.older("")  # at "two"
+        history.edited("two, but more")
+        self.assertEqual(history.older("two, but more"), "three", "starts again from the newest")
+        self.assertEqual(history.newer(), "two, but more", "and the edited text is the draft Down comes back to")
+
+    def test_a_draft_that_is_still_the_recalled_line_keeps_the_place(self):
+        history = self.history("one", "two", "three")
+        history.older("")
+        history.older("")
+        history.edited("two")
+        self.assertEqual(history.older("two"), "one")
+
+    def test_sending_starts_over_and_repeats_and_blanks_are_not_kept(self):
+        history = self.history("one", "one", "  ", "", "two")
+        self.assertEqual([history.older("") for _ in range(3)], ["two", "one", "one"])
+        history.add("three")
+        self.assertEqual(history.older(""), "three")
+
+    def test_a_line_said_twice_in_a_row_is_one_step_back_not_two(self):
+        history = self.history("a", "a", "b")
+        self.assertEqual([history.older("") for _ in range(3)], ["b", "a", "a"])
+        self.assertEqual(history.newer(), "b", "(with a kept twice, this would be the second a)")
+
+    def test_the_same_line_later_on_is_kept_again(self):
+        history = self.history("one", "two", "one")
+        self.assertEqual([history.older("") for _ in range(3)], ["one", "two", "one"])
+
+    def test_only_the_last_fifty_are_kept(self):
+        history = InputHistory(limit=50)
+        for i in range(80):
+            history.add(f"line {i}")
+        seen = [history.older("") for _ in range(60)]
+        self.assertEqual(seen[0], "line 79")
+        self.assertEqual(seen[-1], "line 30")
+        self.assertEqual(len(set(seen)), 50)
+
+    def test_what_is_kept_is_trimmed(self):
+        self.assertEqual(self.history("  hello  ").older(""), "hello")

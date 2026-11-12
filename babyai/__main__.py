@@ -10,9 +10,22 @@ def main(argv=None):
     parser.add_argument("--voice", action="store_true", help="Enable voice mode if available")
     parser.add_argument("--no-voice", action="store_true", help="Disable voice mode")
     parser.add_argument("--desktop", action="store_true", help="Launch the floating desktop overlay (needs Tk)")
+    summon = parser.add_mutually_exclusive_group()
+    summon.add_argument("--toggle", dest="summon", action="store_const", const="toggle", help="Show the running overlay if she is hidden, hide her if she is showing (bind this to a keyboard shortcut)")
+    summon.add_argument("--show", dest="summon", action="store_const", const="show", help="Bring the running overlay up")
+    summon.add_argument("--hide", dest="summon", action="store_const", const="hide", help="Send the running overlay away")
     parser.add_argument("--capri", action="store_true", help="Optional: launch the separate C# Capri app built from capri/ and exit (not needed for --desktop, which has Capri built in); if it can't start, carry on as usual")
     parser.add_argument("command", nargs="?", help="Run a single text command instead of interactive mode")
     args = parser.parse_args(argv)
+
+    if args.summon:  # talks to the overlay that is already running; starts nothing
+        from babyai.ui.summon import send
+
+        answer = send(args.summon)
+        if answer == "ok":
+            return 0
+        print("He isn't running. Start him with: python3 -m babyai --desktop" if answer is None else f"He didn't understand '{args.summon}' ({answer}).")
+        return 1
 
     if args.capri:
         from babyai.capri_launcher import launch_capri

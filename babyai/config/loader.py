@@ -59,6 +59,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "wake_radius_px": 150,
         "look_radius_px": 250,
         "bubble_hide_s": 10,  # her speech bubble hides this long after she finishes talking; 0 keeps it up
+        "summon": True,  # listen for `python3 -m babyai --toggle|--show|--hide` (bind --toggle to a keyboard shortcut to bring her up or send her away)
     },
 }
 
