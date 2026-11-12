@@ -231,7 +231,7 @@ class BabyAIDesktopWindow:
         self._tick_id: str | None = None
         self._timings = timings_from_config(getattr(assistant, "config", None))
         hide_timings = hide_timings_from_config(getattr(assistant, "config", None))
-        self._hide = HideAndSeek(time.monotonic(), hide_timings) if hide_timings is not None else None
+        self._game = HideAndSeek(time.monotonic(), hide_timings) if hide_timings is not None else None
         self._clock = SleepClock(time.monotonic(), self._timings.sleep_after_s, self._timings.wake_radius_px)
         self._last_pointer: tuple[int, int] | None = None
         self._look = (0, 0)  # how far the eyes are slid toward the pointer, in pixels
@@ -573,7 +573,7 @@ class BabyAIDesktopWindow:
         """A click, key press or reply counts as activity: wake up and restart the idle timer."""
         now = time.monotonic()
         self._clock.touch(now)
-        if self._hide is not None and self._hide.attention(now) and self._animator is not None and not self._clock.asleep:
+        if self._game is not None and self._game.attention(now) and self._animator is not None and not self._clock.asleep:
             self._animator.pet(now)  # a grin when she is found
         self._sync_face()
 
@@ -819,11 +819,11 @@ class BabyAIDesktopWindow:
 
     def _hide_tick(self, now: float, busy: bool) -> None:
         """Slide her behind the screen edge when she has been ignored, and back out when the game says so."""
-        if self._hide is None:
+        if self._game is None:
             return
-        self._hide.update(now, busy or self._clock.asleep)
+        self._game.update(now, busy or self._clock.asleep)
         direction = 1 if self._home_x + WIDTH / 2 >= self._screen_w / 2 else -1  # slide off the nearest side
-        target = direction * round(WIDTH * self._hide.fraction())
+        target = direction * round(WIDTH * self._game.fraction())
         delta = target - self._hide_offset
         if abs(delta) <= 1:
             self._hide_offset = float(target)
@@ -1060,8 +1060,8 @@ class BabyAIDesktopWindow:
         now = time.monotonic()
         blocked = self._pressed or self._busy or self._input_open or self._clock.asleep or self._confirm is not None
         if self._pet.feed(event.x, now, self._body_hit(event.x, event.y), blocked):
-            if self._hide is not None:
-                self._hide.attention(now)  # stroking her counts as finding her
+            if self._game is not None:
+                self._game.attention(now)  # stroking her counts as finding her
             self._animator.pet(now)
             self._pet_due = now + PET_DELAY_S
 
