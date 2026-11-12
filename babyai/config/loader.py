@@ -59,6 +59,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "wake_radius_px": 150,
         "look_radius_px": 250,
         "bubble_hide_s": 10,  # her speech bubble hides this long after she finishes talking; 0 keeps it up
+        "sounds": False,  # little sounds (wake chime, reply blip, a knock when she asks permission, a chirp when petted); needs pw-play, paplay or aplay
+        "sound_volume": 0.4,  # 0 to 1
     },
 }
 
