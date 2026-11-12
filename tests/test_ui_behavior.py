@@ -5,7 +5,19 @@ import unittest
 
 from babyai.config.loader import DEFAULT_CONFIG, load_config
 from babyai.ui import behavior
-from babyai.ui.behavior import BubbleTimer, SleepClock, UiTimings, cursor_line, eye_offset, scroll_top, thinking_label, timings_from_config
+from babyai.ui.behavior import (
+    BubbleTimer,
+    HideAndSeek,
+    HideTimings,
+    SleepClock,
+    UiTimings,
+    cursor_line,
+    eye_offset,
+    hide_timings_from_config,
+    scroll_top,
+    thinking_label,
+    timings_from_config,
+)
 
 
 class ThinkingLabelTests(unittest.TestCase):
@@ -267,6 +279,65 @@ class BubbleSettingTests(unittest.TestCase):
         self.assertEqual(timings_from_config({"ui": {"bubble_hide_s": 0}}).bubble_hide_s, 0.0)
         self.assertEqual(timings_from_config({"ui": {"bubble_hide_s": "soon"}}).bubble_hide_s, 10.0)
         self.assertEqual(timings_from_config({"ui": {"bubble_hide_s": -3}}).bubble_hide_s, 10.0)
+
+
+class HideAndSeekTests(unittest.TestCase):
+    def game(self, **timings):
+        return HideAndSeek(0.0, HideTimings(**timings))
+
+    def test_she_stays_out_until_the_idle_threshold(self):
+        game = self.game(hide_after_s=100)
+        self.assertEqual(game.update(99.9), HideAndSeek.OUT)
+        self.assertEqual(game.update(100), HideAndSeek.HIDDEN)
+
+    def test_she_peeks_out_now_and_then_and_slips_back(self):
+        game = self.game(hide_after_s=0, peek_every_s=5, peek_for_s=2)
+        self.assertEqual(game.update(0), HideAndSeek.HIDDEN)
+        self.assertEqual(game.update(4.9), HideAndSeek.HIDDEN)
+        self.assertEqual(game.update(5), HideAndSeek.PEEKING)
+        self.assertEqual(game.update(6.9), HideAndSeek.PEEKING)
+        self.assertEqual(game.update(7), HideAndSeek.HIDDEN)
+        self.assertEqual(game.update(12), HideAndSeek.PEEKING)
+
+    def test_being_busy_keeps_her_out_and_restarts_the_wait(self):
+        game = self.game(hide_after_s=10)
+        self.assertEqual(game.update(10), HideAndSeek.HIDDEN)
+        self.assertEqual(game.update(11, busy=True), HideAndSeek.OUT)
+        self.assertEqual(game.update(20), HideAndSeek.OUT)  # busy at 11: the wait starts again from there
+        self.assertEqual(game.update(21), HideAndSeek.HIDDEN)
+
+    def test_attention_brings_her_back_and_says_whether_she_was_hiding(self):
+        game = self.game(hide_after_s=0)
+        game.update(0)
+        self.assertTrue(game.attention(1))
+        self.assertEqual(game.mode, HideAndSeek.OUT)
+        self.assertFalse(game.attention(2))  # already out: nothing to find
+
+    def test_how_far_she_slides_depends_on_the_mode(self):
+        game = self.game(hide_after_s=0, peek_every_s=5, peek_for_s=2)
+        self.assertEqual(game.fraction(), 0.0)
+        game.update(0)
+        self.assertEqual(game.fraction(), HideTimings().hide_fraction)
+        game.update(5)
+        self.assertEqual(game.fraction(), HideTimings().peek_fraction)
+
+
+class HideSettingTests(unittest.TestCase):
+    def test_it_is_on_by_default(self):
+        self.assertEqual(hide_timings_from_config(DEFAULT_CONFIG), HideTimings())
+        self.assertEqual(hide_timings_from_config({}), HideTimings())
+
+    def test_it_can_be_turned_off(self):
+        self.assertIsNone(hide_timings_from_config({"ui": {"hide_and_seek": False}}))
+        self.assertIsNone(hide_timings_from_config({"ui": {"hide_and_seek": "off"}}))
+
+    def test_the_wait_and_the_peeks_can_be_set(self):
+        timings = hide_timings_from_config({"ui": {"hide_after_s": 45, "peek_every_s": 6, "peek_for_s": 1.5}})
+        self.assertEqual((timings.hide_after_s, timings.peek_every_s, timings.peek_for_s), (45.0, 6.0, 1.5))
+
+    def test_bad_values_fall_back_instead_of_breaking_the_overlay(self):
+        timings = hide_timings_from_config({"ui": {"hide_after_s": -1, "peek_every_s": 0, "peek_for_s": "soon"}})
+        self.assertEqual(timings, HideTimings())
 
 
 if __name__ == "__main__":

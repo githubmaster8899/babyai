@@ -14,6 +14,9 @@ No separate Capri process is involved.
   babyai.ui.typing_box);
 * pencil = type a message, wave = voice input; stroke the pointer back and forth
   over her to pet her; right-click for Sleep / Wake / Quit;
+* after a long quiet spell she slips behind the screen edge, peeks back now and
+  then, and comes out on the next click, key or reply (``[ui] hide_and_seek``, see
+  babyai.ui.behavior). Dragging her sets a new resting spot;
 * when a tool call needs your say-so (the safety gate), the bubble asks and you
   answer Y / N or click.
 * without the sprite files (or with ``[ui] character = "stick"``) a stick-figure
@@ -42,9 +45,11 @@ from typing import TYPE_CHECKING
 
 from babyai.ui.behavior import (
     BubbleTimer,
+    HideAndSeek,
     SleepClock,
     cursor_line,
     eye_offset,
+    hide_timings_from_config,
     needs_typing_box,
     scroll_top,
     thinking_label,
@@ -187,6 +192,11 @@ class BabyAIDesktopWindow:
         self.root.resizable(False, False)
 
         self.transparent, canvas_bg = self._configure_window()
+        self._home_x = 0  # where she sits when fully out; hide-and-seek moves the window around this
+        self._home_y = 0
+        self._screen_w = self.root.winfo_screenwidth()
+        self._hide_offset = 0.0  # how far she has slid towards the nearest edge right now, in pixels
+        self._applied_position: tuple[int, int] | None = None
         self._place_window()
 
         self.canvas = tk.Canvas(
@@ -220,6 +230,8 @@ class BabyAIDesktopWindow:
         self._poll_id: str | None = None
         self._tick_id: str | None = None
         self._timings = timings_from_config(getattr(assistant, "config", None))
+        hide_timings = hide_timings_from_config(getattr(assistant, "config", None))
+        self._hide = HideAndSeek(time.monotonic(), hide_timings) if hide_timings is not None else None
         self._clock = SleepClock(time.monotonic(), self._timings.sleep_after_s, self._timings.wake_radius_px)
         self._last_pointer: tuple[int, int] | None = None
         self._look = (0, 0)  # how far the eyes are slid toward the pointer, in pixels
@@ -386,6 +398,9 @@ class BabyAIDesktopWindow:
         screen_h = self.root.winfo_screenheight()
         x = max(0, screen_w - WIDTH - 48)
         y = max(0, screen_h - HEIGHT - 72)
+        self._screen_w = screen_w
+        self._home_x, self._home_y = x, y
+        self._applied_position = (x, y)
         self.root.geometry(f"{WIDTH}x{HEIGHT}+{x}+{y}")
 
     def _make_fonts(self) -> None:
@@ -556,7 +571,10 @@ class BabyAIDesktopWindow:
 
     def _wake(self) -> None:
         """A click, key press or reply counts as activity: wake up and restart the idle timer."""
-        self._clock.touch(time.monotonic())
+        now = time.monotonic()
+        self._clock.touch(now)
+        if self._hide is not None and self._hide.attention(now) and self._animator is not None and not self._clock.asleep:
+            self._animator.pet(now)  # a grin when she is found
         self._sync_face()
 
     def _presence_tick(self) -> None:
@@ -782,6 +800,7 @@ class BabyAIDesktopWindow:
             dirty = True
         self._presence_tick()
         busy = self._thinking or self._busy or self._input_open or self._confirm is not None or self._shown < self._target
+        self._hide_tick(now, busy)
         if self._bubble_timer.update(now, busy, self._bubble_hidden):
             self._hide_bubble()
             dirty = False
@@ -797,6 +816,25 @@ class BabyAIDesktopWindow:
         now = time.monotonic()
         self._tick_due = max(self._tick_due + TICK_MS / 1000, now)
         return max(1, round((self._tick_due - now) * 1000))
+
+    def _hide_tick(self, now: float, busy: bool) -> None:
+        """Slide her behind the screen edge when she has been ignored, and back out when the game says so."""
+        if self._hide is None:
+            return
+        self._hide.update(now, busy or self._clock.asleep)
+        direction = 1 if self._home_x + WIDTH / 2 >= self._screen_w / 2 else -1  # slide off the nearest side
+        target = direction * round(WIDTH * self._hide.fraction())
+        delta = target - self._hide_offset
+        if abs(delta) <= 1:
+            self._hide_offset = float(target)
+        else:
+            step = max(1.0, 900.0 * TICK_MS / 1000)  # about 900 px a second, so a hide takes under half a second
+            self._hide_offset += max(-step, min(step, delta))
+        x = self._home_x + round(self._hide_offset)
+        position = (x, self._home_y)
+        if position != self._applied_position:
+            self._applied_position = position
+            self.root.geometry(f"+{x}+{self._home_y}")
 
     # ------------------------------------------------------------- interaction
 
@@ -1022,13 +1060,20 @@ class BabyAIDesktopWindow:
         now = time.monotonic()
         blocked = self._pressed or self._busy or self._input_open or self._clock.asleep or self._confirm is not None
         if self._pet.feed(event.x, now, self._body_hit(event.x, event.y), blocked):
+            if self._hide is not None:
+                self._hide.attention(now)  # stroking her counts as finding her
             self._animator.pet(now)
             self._pet_due = now + PET_DELAY_S
 
     def _move_window(self, event) -> None:
         if self._drag is None:
             return
-        self.root.geometry(f"+{event.x_root - self._drag[0]}+{event.y_root - self._drag[1]}")
+        x = event.x_root - self._drag[0]
+        y = event.y_root - self._drag[1]
+        self._home_x, self._home_y = x, y
+        self._hide_offset = 0.0  # dragging her back into view counts as finding her
+        self._applied_position = (x, y)
+        self.root.geometry(f"+{x}+{y}")
 
     def _toggle_sleep(self) -> None:
         if self._clock.asleep:

@@ -17,6 +17,11 @@ WAKE_RADIUS_PX = 150.0  # a pointer that moves this close to the figure's head w
 LOOK_RADIUS_PX = 250.0  # the eyes follow the pointer while it is within this distance of the head
 LOOK_REACH_PX = (6, 4)  # furthest the eyes slide from centre, sideways and up/down
 LOOK_FULL_AT_PX = 80.0  # from this distance on, the eyes are turned all the way
+HIDE_AFTER_S = 180.0  # idle time before she plays hide-and-seek at the screen edge
+PEEK_EVERY_S = 12.0  # while hidden, how often she peeks back out
+PEEK_FOR_S = 2.5  # how long one peek lasts
+HIDE_FRACTION = 0.46  # how much of the window slips off the edge (0.46 leaves her face showing)
+PEEK_FRACTION = 0.25  # how much slips off during a peek
 
 
 def thinking_label(elapsed_s: float, after_s: float = THINK_AFTER_S) -> str | None:
@@ -171,3 +176,91 @@ class BubbleTimer:
             self._due = now + self._after
             return False
         return now >= self._due
+
+
+@dataclass(frozen=True)
+class HideTimings:
+    hide_after_s: float = HIDE_AFTER_S
+    peek_every_s: float = PEEK_EVERY_S
+    peek_for_s: float = PEEK_FOR_S
+    hide_fraction: float = HIDE_FRACTION
+    peek_fraction: float = PEEK_FRACTION
+
+
+def _finite_number(section: Mapping[str, object], name: str, default: float, minimum: float) -> float:
+    value = section.get(name)
+    ok = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= minimum
+    return float(value) if ok else default
+
+
+def hide_timings_from_config(config: object) -> HideTimings | None:
+    """Read the hide-and-seek settings from ``[ui]``; None when the user has turned the game off.
+
+    Missing or nonsensical values fall back to the defaults, and a typo can never break the overlay. The game is on by
+    default: it only starts after a long idle spell, and any click or key brings her straight back."""
+    section = config.get("ui") if isinstance(config, dict) else None
+    if not isinstance(section, dict):
+        return HideTimings()
+    enabled = section.get("hide_and_seek", True)
+    if enabled is False or str(enabled).strip().lower() in ("false", "no", "off", "0"):
+        return None
+    defaults = HideTimings()
+    return HideTimings(
+        hide_after_s=_finite_number(section, "hide_after_s", defaults.hide_after_s, 0.0),
+        peek_every_s=_finite_number(section, "peek_every_s", defaults.peek_every_s, 0.5),
+        peek_for_s=_finite_number(section, "peek_for_s", defaults.peek_for_s, 0.2),
+    )
+
+
+class HideAndSeek:
+    """When she slips off the screen edge to play, peeks back, and returns when the user finds her.
+
+    Display-free: the app asks for the mode each tick and moves the window; nothing here knows about Tk. ``busy``
+    means she is thinking, typing, waiting on an answer, or already talking, and it keeps her out where the user can
+    see her. Any click or key calls ``attention`` and brings her back."""
+
+    OUT = "out"
+    HIDDEN = "hidden"
+    PEEKING = "peeking"
+
+    def __init__(self, now: float, timings: HideTimings | None = None):
+        self.timings = timings or HideTimings()
+        self.last_attention = now
+        self.mode = self.OUT
+        self._next_peek = 0.0
+        self._peek_until = 0.0
+
+    def attention(self, now: float) -> bool:
+        """The user called or found her: come back out. True if she had been hiding or peeking."""
+        was_hiding = self.mode != self.OUT
+        self.mode = self.OUT
+        self.last_attention = now
+        self._next_peek = self._peek_until = 0.0
+        return was_hiding
+
+    def update(self, now: float, busy: bool = False) -> str:
+        """Call every tick; returns the mode she should be in now."""
+        if busy:
+            self.mode = self.OUT
+            self.last_attention = now
+            return self.mode
+        if self.mode == self.OUT:
+            if now - self.last_attention >= self.timings.hide_after_s:
+                self.mode = self.HIDDEN
+                self._next_peek = now + self.timings.peek_every_s
+        elif self.mode == self.HIDDEN:
+            if now >= self._next_peek:
+                self.mode = self.PEEKING
+                self._peek_until = now + self.timings.peek_for_s
+        elif now >= self._peek_until:
+            self.mode = self.HIDDEN
+            self._next_peek = now + self.timings.peek_every_s
+        return self.mode
+
+    def fraction(self) -> float:
+        """How much of the window's width should be off the screen edge in the current mode."""
+        if self.mode == self.PEEKING:
+            return self.timings.peek_fraction
+        if self.mode == self.HIDDEN:
+            return self.timings.hide_fraction
+        return 0.0

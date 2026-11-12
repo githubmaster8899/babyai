@@ -69,6 +69,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "wake_radius_px": 150,
         "look_radius_px": 250,
         "bubble_hide_s": 10,  # her speech bubble hides this long after she finishes talking; 0 keeps it up
+        "hide_and_seek": True,  # after a long quiet spell she slips behind the screen edge, peeks back now and then,
+        # and returns the moment you click, type or she has something to say. false keeps her where she is.
+        "hide_after_s": 180,  # idle seconds before she hides (0 hides as soon as she has finished talking)
+        "peek_every_s": 12,  # while hidden, how often she peeks back out
+        "peek_for_s": 2.5,  # how long one peek lasts
     },
 }
 
