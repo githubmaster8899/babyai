@@ -27,6 +27,17 @@ from babyai.ui.capri_body import CLIPS
 CELL_W, CELL_H = 24, 32
 
 
+class Recorder:
+    """Stands in for the sound player: remembers what she tried to play."""
+
+    def __init__(self):
+        self.played = []
+
+    def play(self, name):
+        self.played.append(name)
+        return True
+
+
 class FakeAssistant:
     def __init__(self, ui=None):
         self.config = {"agent": dict(DEFAULT_CONFIG["agent"]), "ui": {**DEFAULT_CONFIG["ui"], "sleep_after_s": 0, **(ui or {})}}
@@ -204,6 +215,75 @@ class OverlayTests(unittest.TestCase):
         self.assertEqual(win._animator.clip, "grin")
         self.pump(win, 2.0, until=lambda: win._echo == "pets you")
         self.assertIn(win._reply, ("Heh. Okay, I'll allow it.",))
+
+    def test_sounds_are_off_unless_asked_for(self):
+        self.assertFalse(self.window()._sounds.enabled)
+        win = self.window(sounds=True, sound_volume=0.2)
+        self.assertTrue(win._sounds.enabled)
+        self.assertEqual(win._sounds.volume, 0.2)
+
+    def test_she_chimes_when_she_wakes_and_not_when_she_was_already_up(self):
+        win = self.window()
+        win._sounds = Recorder()
+        win._wake()
+        self.assertEqual(win._sounds.played, [])
+        win._clock.sleep()
+        win._wake()
+        win._wake()
+        self.assertEqual(win._sounds.played, ["wake"])
+
+    def test_a_reply_has_its_own_sound_and_does_not_add_the_wake_chime(self):
+        win = self.window()
+        win._sounds = Recorder()
+        win._clock.sleep()
+        win._results.put("hello")
+        self.assertTrue(self.pump(win, 3.0, until=lambda: win._sounds.played))
+        self.assertEqual(win._sounds.played, ["reply"])
+        self.assertFalse(win._clock.asleep)
+
+    def test_the_pointer_coming_close_wakes_her_with_a_chime_but_nothing_else_does(self):
+        win = self.window()
+        win._sounds = Recorder()
+        win._clock.sleep()
+
+        def pointer_woke_her(*_args):
+            win._clock.asleep = False
+            return False  # (tick says whether she is asleep afterwards)
+
+        real_tick = win._clock.tick
+        win._clock.tick = lambda *a: True  # still asleep afterwards
+        win._presence_tick()
+        win._clock.tick = real_tick
+        self.assertEqual(win._sounds.played, [], "a pointer that did not wake her is not a chime")
+        win._clock.tick = pointer_woke_her
+        win._presence_tick()
+        self.assertEqual(win._sounds.played, ["wake"])
+        win._presence_tick()  # awake before and after
+        self.assertEqual(win._sounds.played, ["wake"])
+
+    def test_asking_permission_knocks(self):
+        win = self.window()
+        win._sounds = Recorder()
+        win._clock.sleep()
+        answers = []
+        worker = threading.Thread(target=lambda: answers.append(win._confirm_from_worker("write_file", {}, {"risk_level": "MEDIUM"})))
+        worker.start()
+        self.assertTrue(self.pump(win, 3.0, until=lambda: win._confirm is not None))
+        self.assertEqual(win._sounds.played, ["ask"])
+        win._answer_confirm(False)
+        worker.join(3)
+
+    def test_being_petted_chirps(self):
+        win = self.window()
+        win._sounds = Recorder()
+        self.pump(win, 2.0, until=lambda: win._body_drawn[0] == "idle")
+        h = win._sprites.cell_size[1]
+        from babyai.ui.app import SPRITE_BOTTOM, WIDTH
+
+        x, y = WIDTH // 2, SPRITE_BOTTOM - h // 2
+        for i in range(10):
+            win._on_motion(SimpleNamespace(x=x + (5 if i % 2 else -5), y=y))
+        self.assertEqual(win._sounds.played, ["pet"])
 
     def test_pointer_motion_is_ignored_while_she_is_asleep(self):
         win = self.window()

@@ -57,6 +57,7 @@ from babyai.ui.behavior import (
 )
 from babyai.ui.capri_body import CLIPS, Animator, PetDetector, letters_revealed, mouth_cell, pet_line
 from babyai.ui.persona import apply_character
+from babyai.ui.sounds import SoundPlayer
 from babyai.ui.sprites import DEFAULT_SCALE, SpriteBank
 from babyai.ui.typing_box import TypingBox
 from babyai.ui.xshape import XShape
@@ -255,6 +256,7 @@ class BabyAIDesktopWindow:
         self._shape: XShape | None = None  # clips the window to her outline on X11
         self._shape_key: tuple | None = None
         ui = (getattr(assistant, "config", None) or {}).get("ui", {})
+        self._sounds = SoundPlayer.from_config(ui)  # little sounds: off unless [ui] sounds = true
         self._typing_via_box = needs_typing_box(ui.get("typing", "auto"), self._windowing, os.environ)
         self._typing_box: TypingBox | None = None  # catches the keys when the borderless window can't (see typing_box.py)
 
@@ -569,10 +571,13 @@ class BabyAIDesktopWindow:
         for i in range(letters):  # "z", "z z", "z z z" drifting up and out to the right of the head
             c.create_text(cx + 38 + i * 14, HEAD_Y - 14 - i * 12, text="z", font=self.font_label, fill=CYAN, tags="face")
 
-    def _wake(self) -> None:
-        """A click, key press or reply counts as activity: wake up and restart the idle timer."""
+    def _wake(self, chime: bool = True) -> None:
+        """A click, key press or reply counts as activity: wake up and restart the idle timer.
+        (``chime=False`` when what woke her has a sound of its own: a reply, a question.)"""
         now = time.monotonic()
-        self._clock.touch(now)
+        woke = self._clock.touch(now)
+        if woke and chime:
+            self._sounds.play("wake")
         if self._game is not None and self._game.attention(now) and self._animator is not None and not self._clock.asleep:
             self._animator.pet(now)  # a grin when she is found
         self._sync_face()
@@ -598,7 +603,9 @@ class BabyAIDesktopWindow:
                 self._last_pointer = (px, py)
                 if self._in_bubble(px - self.root.winfo_rootx(), py - self.root.winfo_rooty()):
                     self._bubble_timer.touch()  # resting the pointer on her bubble keeps it up
-        self._clock.tick(now, distance, moved)
+        was_asleep = self._clock.asleep
+        if not self._clock.tick(now, distance, moved) and was_asleep:  # the pointer came close and woke her
+            self._sounds.play("wake")
         self._sync_face()
 
     def _build_controls(self) -> None:
@@ -952,7 +959,8 @@ class BabyAIDesktopWindow:
             while True:
                 self._set_reply(self._results.get_nowait())
                 self._busy = False
-                self._wake()
+                self._wake(chime=False)
+                self._sounds.play("reply")
         except queue.Empty:
             pass
         if self._confirm is None:
@@ -1002,7 +1010,8 @@ class BabyAIDesktopWindow:
             self._hide_typing_box()
             self._input_open = False
             self._draft = ""
-        self._wake()
+        self._wake(chime=False)
+        self._sounds.play("ask")
         self._set_reply(request["text"])
         self.canvas.focus_force()
 
@@ -1063,6 +1072,7 @@ class BabyAIDesktopWindow:
             if self._game is not None:
                 self._game.attention(now)  # stroking her counts as finding her
             self._animator.pet(now)
+            self._sounds.play("pet")
             self._pet_due = now + PET_DELAY_S
 
     def _move_window(self, event) -> None:

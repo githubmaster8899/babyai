@@ -82,6 +82,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "hide_after_s": 180,  # idle seconds before she hides (0 hides as soon as she has finished talking)
         "peek_every_s": 12,  # while hidden, how often she peeks back out
         "peek_for_s": 2.5,  # how long one peek lasts
+        "sounds": False,  # little sounds (wake chime, reply blip, a knock when she asks permission, a chirp when petted); needs pw-play, paplay or aplay
+        "sound_volume": 0.4,  # 0 to 1
     },
 }
 
