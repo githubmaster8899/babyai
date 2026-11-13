@@ -9,6 +9,7 @@ from babyai.agent.context import ConversationContext, DEFAULT_SYSTEM_PROMPT
 from babyai.config.loader import load_config
 from babyai.llm.client import LLMClient
 from babyai.habits import Habits
+from babyai.reminders import Reminders
 from babyai.memory.store import MemoryStore
 from babyai.personality import Personality, defaults_from_config
 from babyai.safety.gate import SafetyGate
@@ -77,9 +78,13 @@ class BabyAI:
             Personality(personality_dir, defaults_from_config(personality_config))
             if personality_config.get("enabled", True) else None
         )
+        # Reminders and timers (babyai/reminders.py): kept in a small file next to the memory database. [reminders] enabled = false turns it off.
+        reminder_config = self.config.get("reminders", {})
+        reminder_dir = reminder_config.get("dir") or os.path.join(os.path.dirname(os.path.expanduser(memory_path)), "reminders")
+        self.reminders = Reminders(reminder_dir) if reminder_config.get("enabled", True) else None
         self.tool_registry = build_default_registry(
             memory_store=self.memory, config=self.config, upgrade=self.upgrade, habits=self.habits,
-            personality=self.personality,
+            personality=self.personality, reminders=self.reminders,
         )
         # He thinks for himself about how to get better and suggests it - he only suggests (babyai/upgrade/ideas.py). [ideas] enabled = false turns it off.
         self.ideas = self.upgrade.ideas if self.upgrade is not None else None
@@ -131,6 +136,16 @@ class BabyAI:
         if self.ideas is not None and self.upgrade is not None and self.ideas.check_due():
             threading.Thread(target=self.ideas.check_updates, args=(self.upgrade.version,), daemon=True, name="babyai-idea-check").start()
 
+    def start_reminders(self, deliver: Callable[[str], None], ready: Callable[[], bool] | None = None) -> None:
+        """Front ends call this once: ``deliver(text)`` is called (from a background thread) when a reminder is due, and
+        ``ready()`` says whether it can be shown right now (until then it waits). Does nothing if reminders are off."""
+        if self.reminders is not None:
+            self.reminders.start(deliver, ready)
+
+    def stop_reminders(self) -> None:
+        if self.reminders is not None:
+            self.reminders.stop()
+
     def cli_confirm(self, name: str, arguments: dict[str, Any], verdict: dict[str, Any]) -> bool:
         shown = ", ".join(f"{key}={str(value)[:80]!r}" for key, value in arguments.items()) or "no arguments"
         risk = verdict.get("risk_level")
@@ -144,6 +159,7 @@ class BabyAI:
         if self.confirm is None and sys.stdin.isatty():
             self.confirm = self.cli_confirm
         print("BabyAI starting. Type 'exit' to quit.")
+        self.start_reminders(lambda text: print(f"\nBabyAI: {text}\nYou> ", end="", flush=True))
         while True:
             try:
                 user_input = input("You> ")

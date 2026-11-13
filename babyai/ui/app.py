@@ -117,6 +117,7 @@ Z_CYCLE = (1, 2, 3, 3, 3)  # letters shown over one cycle; it rests on the full 
 
 BTN_Y = 602
 PET_DELAY_S = 1.3  # she grins first, then says a pet line
+REMINDER_GAP_S = 4.0  # an answer (or her greeting) stays up at least this long before a reminder takes its place
 CONFIRM_TIMEOUT_S = 60  # an unanswered confirmation counts as "no"
 LOADING = "Loading… (first run builds a sprite cache, about 20 s)"
 
@@ -226,6 +227,7 @@ class BabyAIDesktopWindow:
         self._tick_due = time.monotonic()  # when the next tick should run (see _tick_delay)
         self._busy = False
         self._results: queue.Queue[str] = queue.Queue()
+        self._reminder_lines: queue.Queue[str] = queue.Queue()  # reminders that came due, waiting for her to be free to say them
         self._confirm_requests: queue.Queue[dict] = queue.Queue()
         self._confirm: dict | None = None  # the confirmation being asked right now
         self._drag: tuple[int, int] | None = None
@@ -273,6 +275,9 @@ class BabyAIDesktopWindow:
         self._build_controls()
         self._bind_events()
         self.assistant.confirm = self._confirm_from_worker  # the safety gate asks through the bubble
+        start_reminders = getattr(self.assistant, "start_reminders", None)
+        if start_reminders is not None:  # a reminder that is due is said in the bubble, once she isn't in the middle of something
+            start_reminders(self._reminder_lines.put, self._free_for_reminder)
         self._set_reply(f"Hi, I'm {self._name}. Pencil to type, wave to talk.")
         self._poll_results()
         self._tick()
@@ -996,6 +1001,11 @@ class BabyAIDesktopWindow:
                 self._sounds.play("reply")
         except queue.Empty:
             pass
+        if self._free_for_reminder():
+            try:
+                self._say_reminder(self._reminder_lines.get_nowait())
+            except queue.Empty:
+                pass
         if self._confirm is None:
             try:
                 self._begin_confirm(self._confirm_requests.get_nowait())
@@ -1038,6 +1048,18 @@ class BabyAIDesktopWindow:
         except tk.TclError:
             pass
         self.root.lift()
+
+    def _free_for_reminder(self) -> bool:
+        """A reminder doesn't cut in on a reply being worked out, a question waiting for a yes or no, or an answer she is still
+        typing out or has only just given. (Until it can be said it stays in the reminders file, so closing her loses nothing.)"""
+        if self._busy or self._thinking or self._confirm is not None or self._shown < self._target:
+            return False
+        return time.monotonic() - self._reveal_start >= REMINDER_GAP_S
+
+    def _say_reminder(self, text: str) -> None:
+        self._echo = "set a reminder"
+        self._set_reply(text)
+        self._wake()
 
     def _on_mic(self) -> None:
         if self._busy or self._confirm is not None:
@@ -1174,6 +1196,9 @@ class BabyAIDesktopWindow:
         if self._shape is not None:
             self._shape.close()
             self._shape = None
+        stop_reminders = getattr(self.assistant, "stop_reminders", None)
+        if stop_reminders is not None:
+            stop_reminders()
         pending, self._confirm = self._confirm, None
         if pending is not None:  # unblock a tool call that is waiting on an answer (the answer is "no")
             pending["event"].set()

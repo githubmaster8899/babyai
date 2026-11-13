@@ -17,6 +17,7 @@ from babyai.tools.habits import HabitProfileTool
 from babyai.tools.memory import ForgetMemoryTool, RecallMemoryTool, RememberFactTool
 from babyai.tools.personality import PersonalityTool
 from babyai.tools.screen import LookAtScreenTool
+from babyai.tools.reminders import CancelReminderTool, ListRemindersTool, SetReminderTool
 from babyai.tools.shell import RunShellTool
 from babyai.tools.system import GetSystemInfoTool, ManageProcessesTool
 from babyai.tools.upgrade import UpgradeCodeTool, UpgradeIdeasTool, UpgradeModelTool, UpgradeNotesTool, UpgradeVersionTool
@@ -47,7 +48,7 @@ class ToolRegistry:
 
 
 def build_default_registry(memory_store=None, config: dict[str, Any] | None = None, upgrade: Any = None, habits: Any = None,
-                           personality: Any = None) -> ToolRegistry:
+                           personality: Any = None, reminders: Any = None) -> ToolRegistry:
     registry = ToolRegistry()
     tools = [
         ReadFileTool(memory_store, config),
@@ -78,6 +79,8 @@ def build_default_registry(memory_store=None, config: dict[str, Any] | None = No
         tools.append(HabitProfileTool(memory_store, config, habits))
     if personality is not None:  # his manner sliders and what he knows about the user (babyai/personality.py)
         tools.append(PersonalityTool(memory_store, config, personality, habits))
+    if reminders is not None:  # reminders and timers (babyai/reminders.py); off unless the assistant sets it up
+        tools += [SetReminderTool(memory_store, config, reminders), ListRemindersTool(memory_store, config, reminders), CancelReminderTool(memory_store, config, reminders)]
     if upgrade is not None:  # he may upgrade himself (babyai/upgrade); off unless the assistant sets it up
         tools += [UpgradeCodeTool(memory_store, config, upgrade), UpgradeVersionTool(memory_store, config, upgrade),
                   UpgradeModelTool(memory_store, config, upgrade), UpgradeNotesTool(memory_store, config, upgrade)]

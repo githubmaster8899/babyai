@@ -42,6 +42,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "verbosity": 3,
         # "dir" is a personality folder next to the memory database unless you set it here
     },
+    "reminders": {
+        "enabled": True,  # "remind me at 15:30" / "timer for 10 minutes": shown on screen when due, only while he is running
+        # "dir" is a reminders folder next to the memory database unless you set it here
+    },
     "memory": {
         "db_path": "~/.local/share/babyai/memory.db",
     },
