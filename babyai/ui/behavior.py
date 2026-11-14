@@ -10,6 +10,7 @@ import math
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
+DOING_MAX = 40  # the most characters of "what she is doing" shown in the bubble
 THINK_AFTER_S = 15.0  # show the "THINKING… N s" counter once a reply takes this long
 SLEEP_AFTER_S = 600.0  # idle time before the figure falls asleep (0 turns auto-sleep off)
 BUBBLE_HIDE_S = 10.0  # the speech bubble hides this long after she has finished talking (0 keeps it up)
@@ -24,14 +25,20 @@ HIDE_FRACTION = 0.46  # how much of the window slips off the edge (0.46 leaves h
 PEEK_FRACTION = 0.25  # how much slips off during a peek
 
 
-def thinking_label(elapsed_s: float, after_s: float = THINK_AFTER_S) -> str | None:
-    """Text for the waiting counter, or None while the wait is still short.
+def thinking_label(elapsed_s: float, after_s: float = THINK_AFTER_S, doing: str = "") -> str | None:
+    """Text for the waiting line, or None while there is nothing to say yet.
 
-    The number counts up in whole seconds: "THINKING… 15 s", "THINKING… 16 s", ...
+    The number counts up in whole seconds once the wait is long: "THINKING… 15 s", "THINKING… 16 s", ...
+    When she is in the middle of something ("searching the web") that is said straight away instead of "THINKING":
+    "SEARCHING THE WEB…", and the count follows after the same wait.
     """
-    if elapsed_s < after_s:
+    doing = " ".join(str(doing or "").split())[:DOING_MAX]
+    counter = f" {int(elapsed_s)} s" if elapsed_s >= after_s else ""
+    if doing:
+        return f"{doing.upper()}…{counter}"
+    if not counter:
         return None
-    return f"THINKING… {int(elapsed_s)} s"
+    return f"THINKING…{counter}"
 
 
 class SleepClock:

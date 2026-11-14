@@ -43,6 +43,7 @@ class FakeAssistant:
         self.config = {"agent": dict(DEFAULT_CONFIG["agent"]), "ui": {**DEFAULT_CONFIG["ui"], "sleep_after_s": 0, **(ui or {})}}
         self.context = ConversationContext(self.config["agent"]["system_prompt"])
         self.confirm = None
+        self.activity = None
         self.heard = []
 
     def process_user_input(self, text):
@@ -476,6 +477,46 @@ class OverlayTests(unittest.TestCase):
         self.assertEqual(win._game.mode, "out")
         self.assertTrue(self.pump(win, 3.0, until=lambda: win._hide_offset <= 1))
         self.assertEqual(win._applied_position[0], win._home_x)
+
+    # ---- what she is doing while a tool runs
+
+    def test_she_says_what_she_is_doing_while_she_thinks(self):
+        win = self.window()
+        self.assertTrue(callable(win.assistant.activity))
+        win._set_reply("", thinking=True)
+        threading.Thread(target=win.assistant.activity, args=("searching the web",)).start()  # (the worker thread's way in)
+        self.assertTrue(self.pump(win, 3.0, until=lambda: win._think_text == "SEARCHING THE WEB…"))
+        self.assertIn("SEARCHING THE WEB…", self.bubble_text(win))
+
+    def test_when_the_tool_is_done_she_goes_back_to_plain_thinking(self):
+        win = self.window()
+        win._set_reply("", thinking=True)
+        win.assistant.activity("reading a file")
+        self.assertTrue(self.pump(win, 3.0, until=lambda: win._think_text == "READING A FILE…"))
+        win.assistant.activity("")
+        self.assertTrue(self.pump(win, 3.0, until=lambda: win._think_text is None))
+        self.assertNotIn("READING", self.bubble_text(win))
+
+    def test_the_answer_wipes_it_and_a_late_word_after_it_is_ignored(self):
+        win = self.window()
+        win._set_reply("", thinking=True)
+        win.assistant.activity("reading a file")
+        self.pump(win, 0.2)
+        win._set_reply("here you go")
+        self.assertEqual(win._doing, "")
+        win.assistant.activity("searching the web")  # too late: she is not thinking any more
+        self.pump(win, 0.3)
+        self.assertEqual(win._doing, "")
+        self.assertNotIn("SEARCHING", self.bubble_text(win))
+
+    def test_a_new_question_starts_without_the_old_words(self):
+        win = self.window()
+        win._set_reply("", thinking=True)
+        win.assistant.activity("reading a file")
+        self.pump(win, 0.2)
+        self.assertEqual(win._doing, "reading a file")
+        win._set_reply("", thinking=True)
+        self.assertEqual(win._doing, "")
 
     def test_the_slow_first_load_does_not_count_as_idle_time(self):
         real = self.sprites_module.SpriteBank.preload
