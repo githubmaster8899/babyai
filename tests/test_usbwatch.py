@@ -73,7 +73,7 @@ class Disk(unittest.TestCase):
         patches = [
             mock.patch.object(usbwatch, "DISK", self.base / "disk"),
             mock.patch.object(usbwatch, "SYS_BLOCK", self.base / "sys"),
-            mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(self.home / "state"), "XDG_CONFIG_HOME": str(self.home / "cfg")}),
+            mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(self.home / "state"), "XDG_CONFIG_HOME": str(self.home / "cfg"), "XDG_DATA_HOME": str(self.home / "data")}),
         ]
         for patch in patches:
             patch.start()
@@ -679,21 +679,27 @@ class InstallTests(Disk):
             self.addCleanup(patch.stop)
         usbwatch.write_setting(self.config, "usb", "drive", "uuid:ABCD-1234")
 
-    def test_the_login_item_runs_the_watcher_from_this_checkout_with_this_config(self) -> None:
+    def test_the_login_item_runs_the_installed_watcher_with_this_config(self) -> None:
         code, _ = self.run_cli("install", "--config", str(self.config))
         self.assertEqual(code, 0)
         text = usbwatch.autostart_path().read_text()
         self.assertIn("[Desktop Entry]\nType=Application\n", text)
         self.assertIn("Terminal=false\n", text)
-        self.assertIn(f"Path={ROOT}\n", text)
+        self.assertIn(f"Path={usbwatch.stub_dir().resolve()}\n", text)
         exec_line = next(line for line in text.splitlines() if line.startswith("Exec="))[len("Exec="):]
-        self.assertEqual(shlex.split(exec_line), ["env", f"PYTHONPATH={ROOT}", sys.executable, "-m", "babyai.usbwatch", "run", "--config", str(self.config.resolve())])
+        argv = shlex.split(exec_line)
+        self.assertEqual(argv[:3], ["env", "PYTHONDONTWRITEBYTECODE=1", sys.executable])
+        self.assertEqual(argv[3], str(usbwatch.stub_path()))
+        self.assertEqual(argv[4:6], ["run", "--config"])
+        self.assertEqual(argv[6], str(self.config.resolve()))
+        self.assertTrue(usbwatch.stub_path().is_file())
+        self.assertNotIn("from babyai", usbwatch.stub_path().read_text())
 
     def test_what_the_login_item_runs_is_something_the_command_line_accepts(self) -> None:
         self.run_cli("install", "--config", str(self.config))
         exec_line = next(l for l in usbwatch.autostart_path().read_text().splitlines() if l.startswith("Exec="))[len("Exec="):]
         argv = shlex.split(exec_line)
-        args = usbwatch.build_parser().parse_args(argv[argv.index("babyai.usbwatch") + 1:])
+        args = usbwatch.build_parser().parse_args(argv[argv.index("run"):])
         self.assertEqual((args.command, args.config), ("run", str(self.config.resolve())))
 
     def test_installing_again_changes_nothing_and_restarts_the_watcher_so_it_has_the_new_settings(self) -> None:
@@ -718,7 +724,7 @@ class InstallTests(Disk):
         usbwatch.write_setting(spaced, "usb", "drive", "uuid:ABCD-1234")
         self.run_cli("install", "--config", str(spaced))
         exec_line = next(l for l in usbwatch.autostart_path().read_text().splitlines() if l.startswith("Exec="))[len("Exec="):]
-        self.assertEqual(shlex.split(exec_line)[-1], str(spaced.resolve()))
+        self.assertIn(str(spaced.resolve()), shlex.split(exec_line))
         self.assertIn(f'"{spaced.resolve()}"', exec_line)
 
     def test_a_path_that_could_do_something_in_a_login_item_is_refused(self) -> None:
@@ -876,6 +882,126 @@ class RunTests(Disk):
         )
         self.assertEqual(done.returncode, 2)
         self.assertIn("No drive is paired yet", done.stdout)
+
+
+# ---------------------------------------------------------------------------------------------- portable mode
+
+
+class PortableDisk(Disk):
+    """A mounted fake stick with a BabyAI folder on it, and a pairing record with a trust manifest."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        make_disk(self.base)
+        self.mount = self.home / "mnt"
+        self.mount.mkdir()
+        self.app = self.mount / "BabyAI"
+        (self.app / "babyai").mkdir(parents=True)
+        (self.app / "babyai" / "__init__.py").write_text("")
+        (self.app / "babyai" / "a.py").write_text("A = 1\n")
+        (self.app / "config.toml").write_text('[usb]\nmode = "portable"\ndrive = "uuid:ABCD-1234"\n')
+        for name in ("", "cache", "habits", "personality", "reminders", "self"):
+            (self.app / "data" / name).mkdir(parents=True, exist_ok=True)
+        self.mountinfo = self.home / "mountinfo"
+        self.mountinfo.write_text(f"36 35 8:49 / {self.mount} rw - vfat {self.base / 'dev' / 'sdb1'} rw\n")
+        self._mountinfo_patch = mock.patch.object(usbwatch, "MOUNTINFO", self.mountinfo)
+        self._mountinfo_patch.start()
+        self.addCleanup(self._mountinfo_patch.stop)
+        self.pairing_path = self.home / "cfg" / "babyai-usb" / "pairing.toml"
+        self.pairing = {
+            "mode": "portable", "drive": "uuid:ABCD-1234", "app_folder": "BabyAI",
+            "grace_seconds": 3, "launch_if_present": True, "close_on_remove": True,
+            "trust": usbwatch.manifest(self.app),
+        }
+        usbwatch.save_pairing(self.pairing, self.pairing_path)
+
+    def pairing_args(self) -> dict[str, object]:
+        return {"pairing": str(self.pairing_path)}
+
+
+class PortableTrustTests(PortableDisk):
+    def test_a_changed_python_file_is_listed_and_refuses_launch(self) -> None:
+        (self.app / "babyai" / "a.py").write_text("A = 2\n")
+        self.assertEqual(usbwatch.trust_changes(self.pairing, self.app), ["babyai/a.py"])
+        with self.assertRaisesRegex(usbwatch.LaunchError, "changed|trust"):
+            usbwatch.launch_portable(self.pairing, self.home / "state", lambda message: None)
+
+    def test_the_trust_command_prints_the_change_and_the_yes_updates_the_manifest(self) -> None:
+        (self.app / "babyai" / "a.py").write_text("A = 2\n")
+        out = StringIO()
+        with redirect_stdout(out), mock.patch("builtins.input", return_value="yes"):
+            code = usbwatch.main(["trust", "--pairing", str(self.pairing_path)])
+        self.assertEqual(code, 0, out.getvalue())
+        self.assertIn("babyai/a.py", out.getvalue())
+        saved = usbwatch.load_pairing(self.pairing_path)
+        self.assertEqual(saved["trust"]["babyai/a.py"], usbwatch._sha256(self.app / "babyai" / "a.py"))
+        self.assertEqual(usbwatch.trust_changes(saved, self.app), [])
+
+    def test_a_no_leaves_the_manifest_alone(self) -> None:
+        (self.app / "babyai" / "a.py").write_text("A = 2\n")
+        before = usbwatch.load_pairing(self.pairing_path)
+        with redirect_stdout(StringIO()), mock.patch("builtins.input", return_value="no"):
+            code = usbwatch.main(["trust", "--pairing", str(self.pairing_path)])
+        self.assertEqual(code, 1)
+        self.assertEqual(usbwatch.load_pairing(self.pairing_path), before)
+
+    def test_a_manifest_that_is_missing_refuses_until_trusted(self) -> None:
+        pairing = {key: value for key, value in self.pairing.items() if key != "trust"}
+        self.assertTrue(usbwatch.trust_changes(pairing, self.app)[0].startswith("(no trust manifest"))
+
+
+class PortableMakeDriveTests(PortableDisk):
+    def setUp(self) -> None:
+        super().setUp()
+        self.source = self.home / "checkout"
+        for name in ("babyai", "tests", "capri", "assets"):
+            (self.source / name).mkdir(parents=True)
+        (self.source / "babyai" / "__init__.py").write_text("")
+        (self.source / "babyai" / "main.py").write_text("print('hi')\n")
+        (self.source / "config.toml").write_text('[llm]\nmodel = "test"\n')
+        (self.source / "LICENSE").write_text("licence")
+        (self.source / "NOTICE").write_text("notice")
+
+    def test_it_refuses_a_non_empty_app_folder_without_force(self) -> None:
+        self.app.mkdir(parents=True, exist_ok=True)
+        (self.app / "old.txt").write_text("old")
+        code, out = self.run_cli("make-drive", str(self.mount), "--source", str(self.source), "--uuid", "ABCD-1234", "--no-install", "--no-data", "--yes")
+        self.assertEqual(code, 1)
+        self.assertIn("already has files", out)
+
+    def test_it_copies_the_app_configuration_and_trust_but_not_the_host_data(self) -> None:
+        target = self.home / "mnt2"
+        target.mkdir()
+        self.mountinfo.write_text(self.mountinfo.read_text() + f"37 35 8:50 / {target} rw - vfat {self.base / 'dev' / 'sdb1'} rw\n")
+        code, out = self.run_cli(
+            "make-drive", str(target), "--source", str(self.source), "--uuid", "ABCD-1234",
+            "--no-install", "--no-data", "--yes", "--pairing", str(self.pairing_path),
+        )
+        self.assertEqual(code, 0, out)
+        root = target / "BabyAI"
+        self.assertTrue((root / "babyai" / "main.py").is_file())
+        config = (root / "config.toml").read_text()
+        self.assertIn('mode = "portable"', config)
+        self.assertIn('drive = "uuid:ABCD-1234"', config)
+        self.assertIn('model = "test"', config)
+        self.assertTrue((root / "data" / "cache").is_dir())
+        saved = usbwatch.load_pairing(self.pairing_path)
+        self.assertEqual(saved["mode"], "portable")
+        self.assertEqual(saved["trust"], usbwatch.manifest(root))
+        self.assertEqual(usbwatch.trust_changes(saved, root), [])
+
+    def test_the_trust_manifest_covers_tests_and_app_files(self) -> None:
+        target = self.home / "mnt3"
+        target.mkdir()
+        self.mountinfo.write_text(self.mountinfo.read_text() + f"38 35 8:51 / {target} rw - vfat {self.base / 'dev' / 'sdb1'} rw\n")
+        code, _ = self.run_cli(
+            "make-drive", str(target), "--source", str(self.source), "--uuid", "ABCD-1234",
+            "--no-install", "--no-data", "--yes", "--no-git", "--pairing", str(self.pairing_path),
+        )
+        self.assertEqual(code, 0)
+        saved = usbwatch.load_pairing(self.pairing_path)
+        self.assertIn("babyai/main.py", saved["trust"])
+        self.assertIn("babyai/__init__.py", saved["trust"])
 
 
 # ---------------------------------------------------------------------------------------------- all of it together

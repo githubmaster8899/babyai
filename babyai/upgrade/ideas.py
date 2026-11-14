@@ -26,6 +26,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
+from babyai import atomic
 from babyai.habits import learn
 from babyai.upgrade.gitops import UpgradeError
 
@@ -149,10 +150,7 @@ class Ideas:
 
     def _save(self) -> None:
         try:
-            self.directory.mkdir(parents=True, exist_ok=True)
-            temp = self.path.with_name(self.path.name + ".tmp")
-            temp.write_text(json.dumps(self.state, indent=1, sort_keys=True))
-            os.replace(temp, self.path)
+            atomic.write_text(self.path, json.dumps(self.state, indent=1, sort_keys=True))
         except OSError:
             pass  # noticing things must never get in the way of an answer
 

@@ -9,6 +9,8 @@ class RememberFactTool(Tool):
         if not self.memory_store:
             return ToolResult(False, "Memory store is not configured.")
         result = self.memory_store.remember_fact(fact, source)
+        if result.get("saved") is False:
+            return ToolResult(False, "I could not save that: the memory database is not writable right now.", result)
         return ToolResult(True, f"Remembered: {fact}", result)
 
 

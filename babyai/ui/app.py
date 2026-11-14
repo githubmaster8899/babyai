@@ -1107,6 +1107,7 @@ class BabyAIDesktopWindow:
 
         self.menu = tk.Menu(self.root, tearoff=0)
         self.menu.add_command(label="Sleep", command=self._toggle_sleep)  # reads "Wake" while asleep
+        self.menu.add_command(label="Eject USB", command=self._eject_usb)
         self.menu.add_command(label="Quit BabyAI", command=self.close)
         c.bind("<Button-2>" if self._windowing == "aqua" else "<Button-3>", self._popup_menu)
 
@@ -1165,6 +1166,22 @@ class BabyAIDesktopWindow:
             self.menu.tk_popup(event.x_root, event.y_root)
         finally:
             self.menu.grab_release()
+
+    def _eject_usb(self) -> None:
+        """Close this app and unmount a portable drive; the launcher checks the pid before stopping it."""
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        launcher = Path(__file__).resolve().parents[1] / "usbwatch.py"
+        try:
+            subprocess.Popen(
+                [sys.executable, str(launcher), "eject", "--pid", str(os.getpid())],
+                cwd=str(Path.home()), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+            )
+            self._set_reply("Ejecting the USB drive...")
+        except OSError as exc:
+            self._set_reply(f"I couldn't eject the drive: {exc}")
 
     def close(self, _event=None) -> None:
         if self._summon_server is not None:

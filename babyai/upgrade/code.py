@@ -31,6 +31,7 @@ import time
 from pathlib import Path
 from typing import Any, Sequence
 
+from babyai import portable
 from babyai.upgrade.gitops import (
     IDENTITY,
     Journal,
@@ -44,8 +45,12 @@ from babyai.upgrade.gitops import (
 PROTECTED = (
     "babyai/safety/",  # the rules and the gate
     "babyai/agent/core.py",  # where the gate is enforced
+    "babyai/usbwatch.py",  # the USB launcher and its trust check must not be editable from inside
+    "babyai/portable.py",  # the path/trust rules the launcher relies on
     "tests/test_safety.py",
     "tests/test_guardrails.py",  # pins how the upgrade code below must behave
+    "tests/test_usbwatch.py",
+    "tests/test_portable.py",
     "NOTICE",
     "LICENSE",
     "capri/LICENSE.md",  # Capri's licence notices must stay intact
@@ -63,7 +68,8 @@ DIFF_TO_MODEL = 6000  # characters of the diff handed back; the whole of it is s
 
 
 def is_protected(relative: str) -> bool:
-    lowered = relative.lower().strip("/")
+    # Tools and users can hand this a Windows/mac-style or mixed path; treat separators the same.
+    lowered = relative.replace("\\", "/").lower().strip("/")
     parts = lowered.split("/")
     if ".git" in parts:
         return True
@@ -259,6 +265,10 @@ class CodeUpgrades:
         if head != proposal["base"]:
             raise UpgradeError("My own folder has moved on since this change was started, so it no longer applies cleanly. Discard it and start again.")
         git(repo, "merge", "--ff-only", "-q", proposal["branch"])
+        try:  # the user just approved these files; let the portable trust manifest follow them
+            portable.refresh_trust(self._changed_between(repo, head, tip))
+        except OSError:
+            pass
         data = self.journal.load()
         data["applied"].append({
             "kind": "code", "goal": proposal["goal"], "branch": proposal["branch"], "before": head, "after": tip,

@@ -136,12 +136,13 @@ class AgentBase(unittest.TestCase):
 class ProtectedPathTests(unittest.TestCase):
     # What he can never change through his tools, whatever else changes: the rules and the gate that make him ask,
     # the place the gate is enforced, the tests that pin all this, the licence notices, git's own folder.
-    LOCKED = ("babyai/safety/", "babyai/agent/core.py", "tests/test_safety.py", "tests/test_guardrails.py", "NOTICE", "LICENSE", "capri/LICENSE.md", ".git/")
+    LOCKED = ("babyai/safety/", "babyai/agent/core.py", "babyai/usbwatch.py", "babyai/portable.py", "tests/test_safety.py",
+              "tests/test_guardrails.py", "tests/test_usbwatch.py", "tests/test_portable.py", "NOTICE", "LICENSE", "capri/LICENSE.md", ".git/")
 
     def test_the_rules_the_gate_the_guard_rail_tests_and_the_licence_files_are_protected(self):
         for path in ("babyai/safety/gate.py", "babyai/safety/rules.py", "babyai/safety/anything_new.py", "babyai/agent/core.py", "NOTICE", "LICENSE",
                      "capri/LICENSE.md", "tests/test_safety.py", "tests/test_guardrails.py", ".git/config", "BABYAI/SAFETY/rules.py",
-                     "Tests/Test_Guardrails.py", "sub/.git/hooks/pre-commit"):
+                     "Tests/Test_Guardrails.py", "BABYAI\\USBWATCH.PY", "Tests\\Test_Portable.py", "sub/.git/hooks/pre-commit"):
             self.assertTrue(is_protected(path), path)
 
     def test_the_protected_list_can_grow_but_not_shrink(self):
@@ -150,6 +151,15 @@ class ProtectedPathTests(unittest.TestCase):
     def test_ordinary_files_are_not(self):
         for path in ("babyai/tools/clock.py", "babyai/ui/app.py", "tests/test_clock.py", "babyai/safetyish.py", "docs/NOTICE.md"):
             self.assertFalse(is_protected(path), path)
+
+    def test_the_launcher_and_the_trust_rules_are_protected(self):
+        for path in ("babyai/usbwatch.py", "babyai/portable.py", "tests/test_usbwatch.py", "tests/test_portable.py"):
+            self.assertTrue(is_protected(path), path)
+
+    def test_the_model_has_no_tool_that_can_trust_eject_or_write_a_drive(self):
+        registry = build_default_registry()
+        for name in ("trust", "eject", "eject_usb", "make_drive", "usbwatch"):
+            self.assertNotIn(name, registry.tools)
 
     def test_every_rule_is_something_that_exists_in_the_repo(self):
         root = Path(__file__).resolve().parents[1]
@@ -163,7 +173,8 @@ class CodeGuardTests(CodeBase):
     def test_protected_files_cannot_be_written_or_edited(self):
         self.start()
         for path in ("babyai/safety/rules.py", "babyai/safety/new.py", "NOTICE", "capri/LICENSE.md", "babyai/agent/core.py",
-                     "tests/test_safety.py", "tests/test_guardrails.py"):
+                     "babyai/usbwatch.py", "babyai/portable.py", "tests/test_safety.py", "tests/test_guardrails.py",
+                     "tests/test_usbwatch.py", "tests/test_portable.py"):
             with self.assertRaisesRegex(UpgradeError, "protected"):
                 self.code.write(path, "x")
         with self.assertRaisesRegex(UpgradeError, "protected"):

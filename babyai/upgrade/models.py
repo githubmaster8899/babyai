@@ -50,13 +50,13 @@ def set_toml_value(text: str, table: str, key: str, value: str) -> str:
 
 def persist_model(config_path: str, model: str) -> str:
     """Write ``[llm] model`` into the user's config.toml (keeping a .bak of what was there). Returns what was done."""
+    from babyai import atomic
+
     path = Path(config_path)
     old = path.read_text() if path.exists() else ""
     if old and not path.with_name(path.name + ".bak").exists():
         path.with_name(path.name + ".bak").write_text(old)
-    temp = path.with_name(path.name + ".tmp")
-    temp.write_text(set_toml_value(old, "llm", "model", model))
-    os.replace(temp, path)
+    atomic.write_text(path, set_toml_value(old, "llm", "model", model))
     return f"saved to {path}"
 
 

@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 from typing import Callable, Sequence
 
+from babyai import portable
 from babyai.upgrade.gitops import Journal, UpgradeError, git, require_clean, run_tests, short
 
 FETCH_TIMEOUT_S = 90
@@ -106,6 +107,10 @@ class VersionUpdates:
             raise UpgradeError(f"The new version's tests {summary}\nSo I did not update.")
         before = git(repo, "rev-parse", "HEAD")
         git(repo, "merge", "--ff-only", "-q", tip)
+        try:  # the user approved this update; keep the portable trust manifest in step
+            portable.refresh_trust(git(repo, "diff", "--name-only", f"{before}..{tip}").splitlines())
+        except OSError:
+            pass
         data = self.journal.load()
         data["applied"].append({
             "kind": "update", "goal": f"update to {short(tip)} ({behind} commits)", "branch": upstream, "before": before,
@@ -139,6 +144,10 @@ class VersionUpdates:
                 f"The user can run: git reset --hard {short(entry['before'])}"
             )
         git(repo, "reset", "--hard", "-q", entry["before"])
+        try:  # the user approved the rollback; the trusted copy is now this one
+            portable.refresh_trust(git(repo, "diff", "--name-only", f"{entry['after']}..{entry['before']}").splitlines())
+        except OSError:
+            pass
         data = self.journal.load()
         for item in data["applied"]:
             if item["after"] == entry["after"] and item["before"] == entry["before"]:

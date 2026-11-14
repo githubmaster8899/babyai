@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from babyai import atomic
 from babyai.habits import learn
 
 TOOL_NAME = "habit_profile"  # what he is asked about habits through; not counted as a habit itself
@@ -78,10 +79,7 @@ class Habits:
 
     def _save(self) -> None:
         try:
-            self.directory.mkdir(parents=True, exist_ok=True)
-            temp = self.path.with_name(self.path.name + ".tmp")
-            temp.write_text(json.dumps(self.state, indent=1, sort_keys=True))
-            os.replace(temp, self.path)
+            atomic.write_text(self.path, json.dumps(self.state, indent=1, sort_keys=True))
         except OSError:
             pass  # learning must never get in the way of an answer
 

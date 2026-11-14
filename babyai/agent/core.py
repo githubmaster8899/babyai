@@ -5,6 +5,7 @@ import sys
 import threading
 from typing import Any, Callable
 
+from babyai import portable
 from babyai.agent.context import ConversationContext, DEFAULT_SYSTEM_PROMPT
 from babyai.config.loader import load_config
 from babyai.llm.client import LLMClient
@@ -54,6 +55,9 @@ class BabyAI:
     def __init__(self, config_path: str = "config.toml", voice_enabled: bool = False):
         self.config_path = os.path.abspath(os.path.expanduser(config_path))
         self.config = load_config(config_path)
+        self.portable_root = portable.root_for(self.config, self.config_path)
+        if self.portable_root is not None:
+            portable.prepare_environment(self.portable_root)
         self.voice_enabled = voice_enabled or bool(self.config.get("voice", {}).get("enabled", False))
 
         memory_path = self.config.get("memory", {}).get("db_path", "~/.local/share/babyai/memory.db")

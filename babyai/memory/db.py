@@ -85,19 +85,48 @@ class MemoryStore:
         self.db_path = os.path.expanduser(db_path)
         os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
         self._local = threading.local()
+        self.last_write_error: str | None = None
+        self.unsaved: list[str] = []
+        self._check_integrity()
         self._initialize_schema()
 
     @property
     def connection(self) -> sqlite3.Connection:
         """This thread's connection. A sqlite3 connection can't be used from another thread, and the desktop
-        overlay asks the brain from a worker thread, so each thread opens its own (every write commits)."""
+        overlay asks the brain from a worker thread, so each thread opens its own (every write commits).
+
+        DELETE (not WAL) leaves no -wal file behind on a USB stick, and FULL makes a committed write reach the
+        drive before the answer is shown.  The cost is a small wait on each write; durability matters more here."""
         connection = getattr(self._local, "connection", None)
         if connection is None:
             connection = sqlite3.connect(self.db_path, timeout=10)
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA journal_mode = DELETE")
+            connection.execute("PRAGMA synchronous = FULL")
             self._local.connection = connection
         return connection
+
+    def _check_integrity(self) -> None:
+        """Refuse a damaged memory database instead of writing over it."""
+        try:
+            result = self.connection.execute("PRAGMA integrity_check").fetchone()
+        except sqlite3.DatabaseError as exc:
+            raise sqlite3.DatabaseError(f"memory database failed its integrity check: {exc}") from exc
+        if result is None or str(result[0]).lower() != "ok":
+            raise sqlite3.DatabaseError(f"memory database failed its integrity check: {result[0] if result else 'no result'}")
+
+    def _disk_failed(self, exc: BaseException, what: str) -> bool:
+        """True for the errors a removed USB stick produces; those are remembered, not raised."""
+        text = str(exc).lower()
+        gone = any(marker in text for marker in (
+            "disk i/o error", "input/output error", "no such device", "device not configured",
+            "unable to open database file", "database or disk is full", "read-only database",
+        ))
+        if gone:
+            self.last_write_error = f"{what}: {exc}"
+            self.unsaved.append(what)
+        return gone
 
     def _initialize_schema(self) -> None:
         self.connection.execute(
@@ -184,11 +213,16 @@ class MemoryStore:
             self._local.connection = None
 
     def remember_fact(self, fact: str, source: str | None = None) -> dict[str, Any]:
-        cursor = self.connection.execute(
-            "INSERT INTO facts (fact, source) VALUES (?, ?)",
-            (fact, source),
-        )
-        self.connection.commit()
+        try:
+            cursor = self.connection.execute(
+                "INSERT INTO facts (fact, source) VALUES (?, ?)",
+                (fact, source),
+            )
+            self.connection.commit()
+        except (sqlite3.DatabaseError, OSError) as exc:
+            if self._disk_failed(exc, "remember_fact"):
+                return {"id": None, "fact": fact, "source": source, "saved": False}
+            raise
         return {"id": cursor.lastrowid, "fact": fact, "source": source}
 
     def recall_memory(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
@@ -219,28 +253,37 @@ class MemoryStore:
         return [dict(row) for row in rows]
 
     def forget_memory(self, fact_id: int | None = None, query: str | None = None) -> int:
-        if fact_id is not None:
-            cursor = self.connection.execute("DELETE FROM facts WHERE id = ?", (fact_id,))
-            self.connection.commit()
-            return cursor.rowcount
-        if query is not None:
-            match = fts_query(query, loose=False)  # every word must match: a vague request deletes nothing
-            if match is None:
+        try:
+            if fact_id is not None:
+                cursor = self.connection.execute("DELETE FROM facts WHERE id = ?", (fact_id,))
+                self.connection.commit()
+                return cursor.rowcount
+            if query is not None:
+                match = fts_query(query, loose=False)  # every word must match: a vague request deletes nothing
+                if match is None:
+                    return 0
+                cursor = self.connection.execute(
+                    "DELETE FROM facts WHERE id IN (SELECT rowid FROM facts_fts WHERE facts_fts MATCH ?)",
+                    (match,),
+                )
+                self.connection.commit()
+                return cursor.rowcount
+        except (sqlite3.DatabaseError, OSError) as exc:
+            if self._disk_failed(exc, "forget_memory"):
                 return 0
-            cursor = self.connection.execute(
-                "DELETE FROM facts WHERE id IN (SELECT rowid FROM facts_fts WHERE facts_fts MATCH ?)",
-                (match,),
-            )
-            self.connection.commit()
-            return cursor.rowcount
+            raise
         return 0
 
     def append_conversation(self, session_id: str, role: str, content: str) -> None:
-        self.connection.execute(
-            "INSERT INTO conversations (session_id, role, content) VALUES (?, ?, ?)",
-            (session_id, role, content),
-        )
-        self.connection.commit()
+        try:
+            self.connection.execute(
+                "INSERT INTO conversations (session_id, role, content) VALUES (?, ?, ?)",
+                (session_id, role, content),
+            )
+            self.connection.commit()
+        except (sqlite3.DatabaseError, OSError) as exc:
+            if not self._disk_failed(exc, "append_conversation"):
+                raise
 
     def search_conversations(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
         match = fts_query(query, loose=True)

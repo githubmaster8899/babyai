@@ -7,6 +7,8 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     import tomli as tomllib  # type: ignore
 
+from babyai import portable
+
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "llm": {
@@ -46,9 +48,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "db_path": "~/.local/share/babyai/memory.db",
     },
     # Start him when a certain USB drive is plugged in and close him when it is taken out (Linux; `python3 -m babyai.usbwatch pair`
-    # picks the drive and sets "drive" for you). Nothing on the drive is read or run: it is only a key.
+    # picks the drive and sets "drive" for you). mode = "key" keeps only the drive as a key; mode = "portable" runs the copy
+    # of BabyAI that lives on the drive.
     "usb": {
+        "mode": "key",  # "key" (the checkout on this computer) or "portable" (the app on the drive)
         "drive": "",  # e.g. "uuid:ABCD-1234" - empty until you pair a drive
+        "app_folder": "BabyAI",  # the folder on the drive that holds babyai/, capri/, assets/ and config.toml
         "launch_if_present": True,  # the drive is already in when the watcher starts (e.g. at login): start him then too
         "close_on_remove": True,
         "grace_seconds": 3,  # the drive has to be gone this long before he is closed, so a flaky connection doesn't close him
@@ -102,8 +107,11 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 def load_config(path: str = "config.toml") -> dict[str, Any]:
     config = deepcopy(DEFAULT_CONFIG)
     resolved_path = os.path.expanduser(path)
-    if not os.path.exists(resolved_path):
-        return config
-    with open(resolved_path, "rb") as handle:
-        loaded = tomllib.load(handle)
-    return _deep_merge(config, loaded)
+    if os.path.exists(resolved_path):
+        with open(resolved_path, "rb") as handle:
+            loaded = tomllib.load(handle)
+        config = _deep_merge(config, loaded)
+    root = portable.root_for(config, resolved_path)
+    if root is not None:
+        portable.apply_paths(config, root)
+    return config

@@ -15,6 +15,8 @@ import sys
 from pathlib import Path
 from typing import Any, Sequence
 
+from babyai import atomic
+
 GIT_TIMEOUT_S = 60
 TEST_TIMEOUT_S = 600
 IDENTITY = ("-c", "user.name=BabyAI", "-c", "user.email=babyai@localhost")  # so commits never need the user's git identity
@@ -36,7 +38,9 @@ def run(args: Sequence[str], cwd: Path | str, timeout: float = GIT_TIMEOUT_S, en
 
 
 def git(repo: Path | str, *args: str, timeout: float = GIT_TIMEOUT_S, check: bool = True) -> str:
-    code, output = run(["git", *args], repo, timeout)
+    # A FAT/exFAT USB stick cannot store real ownership.  Tell git that this one repository is safe, and only this one.
+    safe = f"safe.directory={Path(repo).resolve()}"
+    code, output = run(["git", "-c", safe, *args], repo, timeout)
     if check and code != 0:
         raise UpgradeError(f"git {args[0]} failed: {output[-300:] or 'no details'}")
     return output
@@ -72,10 +76,7 @@ class Journal:
         return data
 
     def save(self, data: dict[str, Any]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temp = self.path.with_name(self.path.name + ".tmp")
-        temp.write_text(json.dumps(data, indent=2))
-        os.replace(temp, self.path)
+        atomic.write_text(self.path, json.dumps(data, indent=2))
 
 
 _RAN = re.compile(r"^Ran (\d+) tests? in ", re.MULTILINE)

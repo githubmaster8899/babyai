@@ -17,6 +17,8 @@ import threading
 from pathlib import Path
 from typing import Any, Mapping
 
+from babyai import atomic
+
 MIN_VALUE, MAX_VALUE, DEFAULT_VALUE = 1, 5, 3
 
 # name -> (one line per value 1..5). Written in the second person: they go into his prompt.
@@ -103,10 +105,7 @@ class Personality:
 
     def _save(self) -> None:
         try:
-            self.directory.mkdir(parents=True, exist_ok=True)
-            temp = self.path.with_name(self.path.name + ".tmp")
-            temp.write_text(json.dumps(self.state, indent=1, sort_keys=True))
-            os.replace(temp, self.path)
+            atomic.write_text(self.path, json.dumps(self.state, indent=1, sort_keys=True))
         except OSError:
             pass  # a slider must never get in the way of an answer
 
