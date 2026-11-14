@@ -275,12 +275,12 @@ class BabyAIDesktopWindow:
         self._build_controls()
         self._bind_events()
         self.assistant.confirm = self._confirm_from_worker  # the safety gate asks through the bubble
-        start_reminders = getattr(self.assistant, "start_reminders", None)
-        if start_reminders is not None:  # a reminder that is due is said in the bubble, once she isn't in the middle of something
-            start_reminders(self._reminder_lines.put, self._free_for_reminder)
         self._set_reply(f"Hi, I'm {self._name}. Pencil to type, wave to talk.")
         self._poll_results()
         self._tick()
+        start_reminders = getattr(self.assistant, "start_reminders", None)
+        if start_reminders is not None:  # a reminder that is due is said in the bubble, once she isn't in the middle of something
+            start_reminders(self._reminder_lines.put, self._free_for_reminder)
         if ui.get("summon", True) is True:
             server = SummonServer(socket_path(), self._summons)
             self._summon_server = server if server.start() else None  # (None: another overlay already answers, or no place for the socket)
