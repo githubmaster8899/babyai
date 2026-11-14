@@ -34,6 +34,9 @@ TOOL_RISK_LEVELS = {
     "get_clipboard": RiskLevel.HIGH,
     "set_clipboard": RiskLevel.HIGH,
     "get_active_window": RiskLevel.MEDIUM,  # a window title can contain anything; read only, never stored
+    "set_reminder": RiskLevel.LOW,  # it is only ever shown to the user, never run
+    "list_reminders": RiskLevel.LOW,
+    "cancel_reminder": RiskLevel.MEDIUM,  # it deletes something the user asked for
 }
 
 
