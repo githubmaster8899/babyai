@@ -467,14 +467,15 @@ class OverlayTests(unittest.TestCase):
         self.assertTrue(self.pump(win, 2.0, until=lambda: win._body_drawn[0] == "idle"))
 
     def test_she_hides_after_a_quiet_spell_and_comes_back_when_found(self):
-        win = self.window(hide_and_seek=True, hide_after_s=1.0, peek_every_s=100, sleep_after_s=0)
+        # The wait is long next to one slide so a slow machine can't see her hide again before she is back out.
+        win = self.window(hide_and_seek=True, hide_after_s=3.0, peek_every_s=100, sleep_after_s=0)
         self.finish_typing(win)
-        self.assertTrue(self.pump(win, 3.0, until=lambda: win._game.mode == "hidden"))
-        self.assertTrue(self.pump(win, 3.0, until=lambda: win._hide_offset > 100))
+        self.assertTrue(self.pump(win, 10.0, until=lambda: win._game.mode == "hidden"))
+        self.assertTrue(self.pump(win, 10.0, until=lambda: win._hide_offset > 100))
         self.assertEqual(win._applied_position[0], win._home_x + round(win._hide_offset))
         win._wake()  # a click, key or reply: she comes back out
         self.assertEqual(win._game.mode, "out")
-        self.assertTrue(self.pump(win, 3.0, until=lambda: win._hide_offset <= 1))
+        self.assertTrue(self.pump(win, 10.0, until=lambda: win._hide_offset <= 1))
         self.assertEqual(win._applied_position[0], win._home_x)
 
     def test_the_slow_first_load_does_not_count_as_idle_time(self):
