@@ -93,8 +93,7 @@ python3 -m babyai.usbwatch make-drive "/run/media/you/BENNY"
 * records the SHA-256 manifest and installs/starts the host watcher.
 
 Useful options: `--data-from PATH`, `--no-data`, `--overwrite-data`,
-`--app-folder NAME`, `--uuid UUID`, `--no-install`, and `--yes` (only when you
-are certain). The default app folder is `BabyAI`; the mount point may contain
+`--app-folder NAME`, `--uuid UUID`, and `--no-install`. The default app folder is `BabyAI`; the mount point may contain
 spaces.
 
 The launcher resolves the stick by filesystem UUID, waits about 20 seconds for
@@ -112,8 +111,8 @@ launch, the launcher recomputes it. If anything is new, changed or missing, it:
 * refuses to launch;
 * tells you to run `trust`.
 
-The `trust` command lists the changed files and asks before updating the
-manifest:
+The `trust` command lists the changed files and requires an interactive
+confirmation before updating the manifest. There is no non-interactive bypass:
 
 ```sh
 # from the app folder on the stick, or with the package on PYTHONPATH

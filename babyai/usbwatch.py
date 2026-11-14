@@ -1221,13 +1221,12 @@ def cmd_trust(args: argparse.Namespace) -> int:
     print("These Python files are new, changed or missing since the last trust:")
     for name in changed:
         print(f"  {name}")
-    if args.yes:
-        answer = "yes"
-    else:
-        try:
-            answer = input("Trust them and update the manifest? [y/N] ")
-        except EOFError:
-            answer = ""
+    # Trust is deliberately interactive: no command-line flag may turn a
+    # model- or script-issued command into approval of changed executable code.
+    try:
+        answer = input("Trust them and update the manifest? [y/N] ")
+    except EOFError:
+        answer = ""
     if answer.strip().lower() not in ("y", "yes"):
         print("Not trusted. He will refuse to start from this drive until you run trust again.")
         return 1
@@ -1455,7 +1454,8 @@ def cmd_eject(args: argparse.Namespace) -> int:
             ollama_pid = None
         if ollama_pid is not None and _is_the_ollama(ollama_pid, root):
             stop_pid(ollama_pid)
-    stop_watcher(state_dir())
+    # Keep the host watcher alive. It must continue watching after an eject so
+    # reinserting the stick can start BabyAI again without a login/logout.
     _clear_child_state()
     udisksctl = shutil.which("udisksctl")
     if not udisksctl:
@@ -1515,7 +1515,6 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("uninstall", parents=[common], help="remove the login item and stop the watcher").set_defaults(run=cmd_uninstall)
     sub.add_parser("status", parents=[common], help="what is set up, and what the watcher has been doing").set_defaults(run=cmd_status)
     trust = sub.add_parser("trust", parents=[common], help="list and accept changed Python files on a portable drive")
-    trust.add_argument("--yes", action="store_true", help="accept without the question (non-interactive)")
     trust.set_defaults(run=cmd_trust)
     eject = sub.add_parser("eject", parents=[common], help="close this app and unmount the portable drive")
     eject.add_argument("--pid", type=int, help="the app pid requesting the eject (checked before it is stopped)")
