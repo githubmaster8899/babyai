@@ -3,6 +3,7 @@
 Capri's real sprites are slow to prepare the first time, so these use tiny synthetic strips
 with the same layout (same clip names and cell counts)."""
 
+import gc
 import os
 import tempfile
 import threading
@@ -94,6 +95,8 @@ class OverlayTests(unittest.TestCase):
                 win.close()
             except tk.TclError:
                 pass
+        self.windows.clear()
+        gc.collect()  # free her Tk interpreter here, on the main thread, not later inside some worker thread
         self.sprites_module.SPRITE_DIR = self._old_dir
         if self._old_cache is None:
             os.environ.pop("XDG_CACHE_HOME", None)
