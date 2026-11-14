@@ -839,7 +839,8 @@ class BabyAIDesktopWindow:
         """Slide her behind the screen edge when she has been ignored, and back out when the game says so."""
         if self._game is None:
             return
-        self._game.update(now, busy or self._clock.asleep)
+        returning = self._game.mode == self._game.OUT and abs(self._hide_offset) > 1
+        self._game.update(now, busy or self._clock.asleep or returning)
         direction = 1 if self._home_x + WIDTH / 2 >= self._screen_w / 2 else -1  # slide off the nearest side
         target = direction * round(WIDTH * self._game.fraction())
         delta = target - self._hide_offset
