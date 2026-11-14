@@ -26,6 +26,9 @@ class SemanticRecallTests(unittest.TestCase):
         found = self.facts("do I have any pets?")
         self.assertTrue(any("Miso" in fact for fact in found), found)
 
+    def test_a_word_that_merely_starts_like_a_fact_word_finds_nothing(self):
+        self.assertEqual(self.store.search_semantic("category"), [])
+
     def test_an_unrelated_word_finds_nothing(self):
         self.assertEqual(self.store.search_semantic("quantum chromodynamics"), [])
 
@@ -60,6 +63,19 @@ class SemanticScoringTests(unittest.TestCase):
         self.assertGreater(exact, concept)
         self.assertGreater(concept, unrelated)
         self.assertEqual(unrelated, 0.0)
+
+    def score(self, query, fact):
+        return semantic_score(semantic_tokens(query), semantic_tokens(fact))
+
+    def test_a_word_and_its_longer_form_count_as_half_a_match(self):
+        self.assertAlmostEqual(self.score("eating", "I eat noodles"), 0.5 / 1.5)
+        self.assertAlmostEqual(self.score("cats", "the cat sleeps"), 0.5 / 1.5)
+        self.assertAlmostEqual(self.score("recommendation", "a recommend list"), 0.5 / 1.5)
+
+    def test_a_short_word_is_not_a_stem_of_just_any_longer_word(self):
+        self.assertEqual(self.score("category", "a cat called Miso"), 0.0)
+        self.assertEqual(self.score("program", "the pro model"), 0.0)
+        self.assertEqual(self.score("airplane", "my tv is on ai"), 0.0)
 
     def test_empty_text_scores_zero(self):
         self.assertEqual(semantic_score([], ["ramen"]), 0.0)

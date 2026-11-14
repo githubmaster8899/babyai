@@ -58,6 +58,12 @@ class ReadActiveWindowTests(unittest.TestCase):
         self.assertEqual(info["backend"], "kdotool")
         self.assertEqual(info["title"], "hello")
 
+    def test_an_error_exit_is_not_believed_even_if_it_printed_something(self):
+        def run(command, **kwargs):
+            return finished(json.dumps({"title": "error text", "class": "usage"}), returncode=2)
+
+        self.assertIsNone(read_active_window(run=run, which=which_only("hyprctl")))
+
     def test_nothing_installed_means_no_guess(self):
         self.assertIsNone(read_active_window(run=lambda *a, **k: finished(), which=which_only()))
 

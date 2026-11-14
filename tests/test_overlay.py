@@ -467,7 +467,7 @@ class OverlayTests(unittest.TestCase):
         self.assertTrue(self.pump(win, 2.0, until=lambda: win._body_drawn[0] == "idle"))
 
     def test_she_hides_after_a_quiet_spell_and_comes_back_when_found(self):
-        win = self.window(hide_and_seek=True, hide_after_s=0, peek_every_s=100, sleep_after_s=0)
+        win = self.window(hide_and_seek=True, hide_after_s=1.0, peek_every_s=100, sleep_after_s=0)
         self.finish_typing(win)
         self.assertTrue(self.pump(win, 3.0, until=lambda: win._game.mode == "hidden"))
         self.assertTrue(self.pump(win, 3.0, until=lambda: win._hide_offset > 100))
