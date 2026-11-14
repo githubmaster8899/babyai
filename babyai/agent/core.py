@@ -5,6 +5,7 @@ import sys
 import threading
 from typing import Any, Callable
 
+from babyai.activity import describe_tool
 from babyai.agent.context import ConversationContext, DEFAULT_SYSTEM_PROMPT
 from babyai.config.loader import load_config
 from babyai.llm.client import LLMClient
@@ -97,6 +98,8 @@ class BabyAI:
         # Set by the front end (CLI prompt, desktop bubble). Without one, anything the
         # safety gate wants confirmed is declined rather than silently run.
         self.confirm: ConfirmHook | None = None
+        # Told in a few words what he is doing while a tool runs ("searching the web"), and "" when it is done; the overlay shows it.
+        self.activity: Callable[[str], None] | None = None
         # What to say when the model can't be reached, with {url} and {reason} filled in. Unset keeps the
         # plain canned text-mode replies; the desktop character sets it so she says what is wrong.
         self.offline_reply: str | None = None
@@ -256,6 +259,7 @@ class BabyAI:
             self.safety_gate.record_confirmation(name, args, approved)
             if not approved:
                 return f"The user declined to let {name} run."
+        self._say_activity(describe_tool(name))
         try:
             result = self.tool_registry.call(name=name, arguments=args, interactive=True)
         except TypeError as exc:  # the model passed arguments the tool does not take
@@ -263,6 +267,8 @@ class BabyAI:
         except Exception as exc:
             self._noticed("tool_crashed", name)
             return f"{name} failed: {exc}"
+        finally:
+            self._say_activity("")
         if self.habits is not None:
             try:
                 self.habits.observe_tool(name)
@@ -273,6 +279,14 @@ class BabyAI:
         else:
             text = str(getattr(result, "content", result))
         return text[:MAX_TOOL_OUTPUT]
+
+    def _say_activity(self, text: str) -> None:
+        if self.activity is None:
+            return
+        try:
+            self.activity(text)
+        except Exception:  # a broken display must never stop a tool or lose its answer
+            pass
 
     def _preview(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         """The arguments as the confirmation prompt shows them: the tool's own summary if it has one."""

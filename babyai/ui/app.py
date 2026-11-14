@@ -220,7 +220,9 @@ class BabyAIDesktopWindow:
         self._target = 0  # reveal count at which the whole reply is visible
         self._thinking = False
         self._think_since: float | None = None  # monotonic time the current wait began
-        self._think_text: str | None = None  # "THINKING… N s" once the wait gets long
+        self._think_text: str | None = None  # "THINKING… N s" once the wait gets long, or what she is doing ("SEARCHING THE WEB…")
+        self._doing = ""  # what she is doing right now, from the assistant (babyai/activity.py); only while she is thinking
+        self._activity_lines: queue.Queue[str] = queue.Queue()  # filled from the worker thread, read on the Tk thread
         self._input_open = False
         self._tick_n = 0
         self._tick_due = time.monotonic()  # when the next tick should run (see _tick_delay)
@@ -273,6 +275,7 @@ class BabyAIDesktopWindow:
         self._build_controls()
         self._bind_events()
         self.assistant.confirm = self._confirm_from_worker  # the safety gate asks through the bubble
+        self.assistant.activity = self._activity_lines.put  # and she says what she is doing while a tool runs
         self._set_reply(f"Hi, I'm {self._name}. Pencil to type, wave to talk.")
         self._poll_results()
         self._tick()
@@ -666,6 +669,7 @@ class BabyAIDesktopWindow:
         self._thinking = thinking
         self._think_since = time.monotonic() if thinking else None
         self._think_text = None
+        self._doing = ""
         self._shown = 0  # the reply types itself out from the start
         self._scroll = None
         self._bubble_timer.touch()
@@ -810,7 +814,7 @@ class BabyAIDesktopWindow:
                 self._pet_count += 1
                 dirty = False  # _set_reply already redrew the bubble
         if self._thinking and self._think_since is not None:
-            text = thinking_label(now - self._think_since, self._timings.think_after_s)
+            text = thinking_label(now - self._think_since, self._timings.think_after_s, self._doing)
             if text != self._think_text:
                 self._think_text = text
                 dirty = True
@@ -988,6 +992,13 @@ class BabyAIDesktopWindow:
         self._results.put(reply or "(no reply)")
 
     def _poll_results(self) -> None:
+        try:
+            while True:
+                doing = self._activity_lines.get_nowait()
+                if self._thinking:  # (a late word after the answer is ignored)
+                    self._doing = doing
+        except queue.Empty:
+            pass
         try:
             while True:
                 self._set_reply(self._results.get_nowait())
