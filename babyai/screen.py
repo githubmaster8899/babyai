@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import tempfile
 from typing import Any, Callable
 
 TIMEOUT_S = 12
@@ -46,22 +47,38 @@ def capture_to(path: str, target: str = "screen", run: Callable[..., Any] | None
     """Write a screenshot of the whole screen (or the focused window) to ``path``; return it, or None.
 
     ``target`` is ``"screen"`` or ``"window"``. Only tools already installed are tried, and each attempt
-    is a separate process, so a desktop that refuses screenshots ends with a plain None, not a crash."""
+    is a separate process, so a desktop that refuses screenshots ends with a plain None, not a crash.
+
+    Each tool writes into a private scratch folder next to ``path`` and only a real, non-empty picture is
+    moved into place, so a failed attempt never touches a file that was already at ``path``."""
     run = run or subprocess.run
     which = which or shutil.which
     absolute = os.path.abspath(os.path.expanduser(path))
+    folder = os.path.dirname(absolute) or "."
     try:
-        os.makedirs(os.path.dirname(absolute) or ".", exist_ok=True)
+        os.makedirs(folder, exist_ok=True)
+        scratch = tempfile.mkdtemp(prefix=".babyai-shot-", dir=folder)
     except OSError:
         return None
-    for command in _commands(absolute, target):
-        if not which(command[0]):
-            continue
-        if os.path.exists(absolute):  # a leftover from an earlier attempt must not count as this one's work
-            try:
-                os.remove(absolute)
-            except OSError:
-                pass
-        if _quiet_run(command, run) and os.path.exists(absolute) and os.path.getsize(absolute) > 0:
-            return absolute
-    return None
+    try:
+        taken = os.path.join(scratch, "shot" + (os.path.splitext(absolute)[1] or ".png"))
+        for command in _commands(taken, target):
+            if not which(command[0]):
+                continue
+            if _quiet_run(command, run) and os.path.isfile(taken) and os.path.getsize(taken) > 0:
+                try:
+                    os.replace(taken, absolute)
+                except OSError:
+                    return None
+                return absolute
+            _forget(taken)  # whatever a failed attempt left behind must not pass for the next one's work
+        return None
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _forget(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass

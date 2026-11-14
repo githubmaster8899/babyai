@@ -13,12 +13,14 @@ from __future__ import annotations
 import os
 import tempfile
 from typing import Any
+from urllib.parse import urlparse
 
 from babyai import screen
 from babyai.llm.client import LLMClient
 from babyai.tools.base import Tool, ToolResult
 
 DEFAULT_QUESTION = "What is on my screen? Describe the parts that matter, briefly."
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 
 
 class LookAtScreenTool(Tool):
@@ -70,4 +72,19 @@ class LookAtScreenTool(Tool):
         return ToolResult(True, text, {"model": model or "the configured model", "stored": False})
 
     def preview(self, question: str = DEFAULT_QUESTION, **_: Any) -> dict[str, Any] | None:
-        return {"screen": f"one screenshot, then: {question or DEFAULT_QUESTION}"}
+        llm = self.config.get("llm", {}) if isinstance(self.config, dict) else {}
+        return {
+            "screen": f"one screenshot, then: {question or DEFAULT_QUESTION}",
+            "the picture goes to": _where_it_goes(llm),
+        }
+
+
+def _where_it_goes(llm: dict[str, Any]) -> str:
+    """Say plainly who gets to see the screenshot, so the user can say no to a model that isn't on this computer."""
+    model = str(llm.get("vision_model") or "").strip()
+    if not model:
+        return "nobody - no vision model is set, so nothing will be taken"
+    host = (urlparse(str(llm.get("base_url") or "http://localhost:11434/v1")).hostname or "").lower()
+    if host in LOCAL_HOSTS:
+        return f"the vision model {model} on this computer; it is deleted right after"
+    return f"the vision model {model} at {host or 'a server'}, which is NOT this computer; it is deleted here right after"

@@ -44,6 +44,16 @@ def semantic_tokens(text: str) -> list[str]:
     return [word for word in words if len(word) > 1 and word not in SEMANTIC_STOPWORDS]
 
 
+def _shares_stem(word: str, other: str) -> bool:
+    """True when one word is the other with something added to it ("eat"/"eating", "cats"/"cat").
+
+    A short stem only counts when little was added, so "cat" does not match "category" or "pro" "program"."""
+    short, long = sorted((word, other), key=len)
+    if not long.startswith(short):
+        return False
+    return len(short) >= 5 or (len(short) >= 3 and len(long) - len(short) <= 3)
+
+
 def semantic_score(query_tokens: list[str], fact_tokens: list[str]) -> float:
     """How much a stored fact is about the same thing as the query, from 0 to about 1.
 
@@ -58,7 +68,7 @@ def semantic_score(query_tokens: list[str], fact_tokens: list[str]) -> float:
     for word in query:
         if word in fact:
             matched += 1.0
-        elif any(len(word) >= 4 and (other.startswith(word) or word.startswith(other)) for other in fact):
+        elif len(word) >= 4 and any(_shares_stem(word, other) for other in fact):
             matched += 0.5
         else:
             concept = WORD_CONCEPT.get(word)

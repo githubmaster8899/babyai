@@ -166,6 +166,17 @@ class PersonalityWiringTests(unittest.TestCase):
         self.assertTrue(gate.check("personality", {"action": "about"})["allowed"])
         self.assertTrue(gate.check("personality", {"action": "set", "slider": "warmth", "value": 5})["needs_confirmation"])
 
+    def test_changing_back_to_the_starting_values_is_also_the_users_call(self):
+        gate = SafetyGate(level="strict")
+        self.assertTrue(gate.check("personality", {"action": "reset"})["needs_confirmation"])
+
+    def test_a_file_with_the_wrong_sliders_is_not_trusted(self):
+        path = os.path.join(self.dir.name, "personality.json")
+        for values in ({"warmth": 5}, {"playfulness": 5, "warmth": 5, "curiosity": 5, "verbosity": 5, "volume": 5}):
+            with open(path, "w") as handle:
+                json.dump({"version": 1, "values": values}, handle)
+            self.assertEqual(Personality(self.dir.name).values()["warmth"], 3, values)
+
     def test_a_broken_file_does_not_stop_him(self):
         path = os.path.join(self.dir.name, "personality.json")
         with open(path, "w") as handle:
