@@ -1322,7 +1322,6 @@ def _portable_config_text(source_config: Path | None, spec: str, app_folder: str
     text = set_toml_value(text, "usb", "drive", spec)
     text = set_toml_value(text, "usb", "mode", "portable")
     text = set_toml_value(text, "usb", "app_folder", app_folder)
-    text = set_toml_bool(text, "portable", "enabled", True)
     return text
 
 
