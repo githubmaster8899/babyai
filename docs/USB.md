@@ -175,6 +175,12 @@ Changes the user approves through the existing self-upgrade flow
 at the end of that operation, because the user already approved those files.
 A manual edit on the stick still needs `trust`.
 
+A stick paired before the manifest grew to cover git's settings and the bundled
+programs will, the first time after the launcher is updated, list `.git/config`
+(and any hooks or bundled programs) as new and refuse to launch. That is expected:
+look at the list, then run `python3 -m babyai.usbwatch trust` once in a terminal
+and answer `y`.
+
 ## Removing the stick safely
 
 Use the right-click **Eject USB** menu in the overlay. It:

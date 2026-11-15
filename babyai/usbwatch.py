@@ -791,7 +791,7 @@ def _manager_environment(timeout: float = 5.0) -> dict[str, str]:
     if not tool:
         return {}
     try:
-        done = subprocess.run([tool, "--user", "show-environment"], capture_output=True, text=True, timeout=timeout)
+        done = subprocess.run([tool, "--user", "show-environment"], capture_output=True, text=True, timeout=timeout, check=False)
     except (OSError, subprocess.TimeoutExpired):
         return {}
     if done.returncode != 0:
@@ -1468,7 +1468,7 @@ def _git_ignore_file_modes(root: Path, log: Callable[[str], None]) -> None:
         log("git isn't installed here, so I could not set core.fileMode=false on the stick's copy; do it once there before an upgrade.")
         return
     try:
-        done = subprocess.run([tool, "config", "--file", str(config), "core.fileMode", "false"], capture_output=True, text=True, timeout=15)
+        done = subprocess.run([tool, "config", "--file", str(config), "core.fileMode", "false"], capture_output=True, text=True, timeout=15, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
         log(f"Could not set core.fileMode=false on the stick's copy: {exc}")
         return

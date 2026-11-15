@@ -777,8 +777,10 @@ class StatusTests(Disk):
     def test_it_says_which_display_he_would_get_without_giving_away_the_authority_file(self) -> None:
         cookie = self.home / "xauth_private_name"
         cookie.write_text("SECRETCOOKIE")
-        with mock.patch.object(usbwatch, "_manager_environment", return_value={"DISPLAY": ":0", "XAUTHORITY": str(cookie)}):
-            out = self.run_cli("status", "--config", str(self.config))[1]
+        outside = {key: value for key, value in os.environ.items() if key not in usbwatch.DISPLAY_KEYS}  # (a real X server in the test run must not leak in)
+        with mock.patch.dict(os.environ, outside, clear=True):
+            with mock.patch.object(usbwatch, "_manager_environment", return_value={"DISPLAY": ":0", "XAUTHORITY": str(cookie)}):
+                out = self.run_cli("status", "--config", str(self.config))[1]
         self.assertIn("DISPLAY=:0", out)
         self.assertIn("X authority file: found", out)
         self.assertNotIn("SECRETCOOKIE", out)
@@ -828,6 +830,9 @@ class OneWatcherTests(Disk):
         watcher = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "babyai.usbwatch"])
         self.addCleanup(reap, watcher)
         (directory / "usbwatch.pid").write_text(f"{watcher.pid}\n")
+        deadline = time.monotonic() + 10  # (until the new process has really become python: before that /proc shows its parent's command line)
+        while time.monotonic() < deadline and b"babyai.usbwatch" not in Path(f"/proc/{watcher.pid}/cmdline").read_bytes():
+            time.sleep(0.02)
         self.assertEqual(usbwatch.running_watcher(directory), watcher.pid)
         stopper = threading.Thread(target=watcher.wait)  # (reaps it, so it does not stay as a zombie that still looks alive)
         stopper.start()
@@ -1348,7 +1353,7 @@ class EjectTests(PortableDisk):
     def test_a_process_that_is_not_him_is_left_alone(self) -> None:
         other = subprocess.Popen(["sleep", "60"], start_new_session=True)
         self.addCleanup(lambda: (other.poll() is None and other.kill(), other.wait()))
-        code, out = self.eject("--pid", str(other.pid))
+        _code, out = self.eject("--pid", str(other.pid))
         self.assertIn("left every process alone", out)
         self.assertIsNone(other.poll())
 
