@@ -74,6 +74,9 @@ TOP_SKIPPED = frozenset({"data", "runtime", "ollama"})  # (only at the top: his 
 TREES = ("runtime", "ollama/bin")  # bundled programs: if they are on the stick they run as him, so they are in the manifest
 GIT_FILES = (".git/config", ".git/info/attributes")  # what git runs on its own: config (fsmonitor, hooks path...) and hooks
 PAIRING_NAME = "pairing.toml"
+DISPLAY_KEYS = ("DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY")  # what a window needs; they change from one login (or Xwayland restart) to the next
+X11_SOCKETS = Path("/tmp/.X11-unix")
+DISPLAY_WAIT_SECONDS = 45.0  # how long to wait for the desktop after login before giving up on a launch
 
 
 class LaunchError(Exception):
@@ -436,14 +439,20 @@ def _log_to_file(directory: Path) -> Callable[[str], None]:
     return write
 
 
-def spawn(command: list[str], cwd: Path, directory: Path, env: dict[str, str] | None = None) -> subprocess.Popen:
+def spawn(command: list[str], cwd: Path, directory: Path, env: dict[str, str | None] | None = None) -> subprocess.Popen:
+    """Start ``command`` in a session of its own.  ``env`` is added to this process's environment; a value of ``None`` removes that variable."""
     directory.mkdir(parents=True, exist_ok=True)
+    environment = dict(os.environ)
+    for name, value in (env or {}).items():
+        if value is None:
+            environment.pop(name, None)
+        else:
+            environment[name] = value
     path = directory / "babyai-from-usb.log"  # what he prints: the only place a failed start shows up
     output = open(path, "wb" if path.exists() and path.stat().st_size > MAX_LOG_BYTES else "ab")
     try:
         return subprocess.Popen(
-            command, cwd=cwd, stdin=subprocess.DEVNULL, stdout=output, stderr=output, start_new_session=True,
-            env={**os.environ, **(env or {})},
+            command, cwd=cwd, stdin=subprocess.DEVNULL, stdout=output, stderr=output, start_new_session=True, env=environment,
         )
     finally:
         output.close()
@@ -770,10 +779,99 @@ def choose_python(root: Path, log: Callable[[str], None] = lambda message: None)
     return system
 
 
-def check_display(log: Callable[[str], None] = lambda message: None) -> None:
-    if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
-        return
-    raise LaunchError("There is no display (DISPLAY/WAYLAND_DISPLAY). Start the watcher from your desktop login, not from a bare terminal.")
+def _manager_environment(timeout: float = 5.0) -> dict[str, str]:
+    """DISPLAY / WAYLAND_DISPLAY / XAUTHORITY as the user's systemd manager has them right now.
+
+    That is the environment KDE keeps up to date and hands to everything it starts later, so unlike this process's own
+    environment (fixed at the moment the watcher started) it is current after a re-login or an Xwayland restart.  Only
+    the three names are kept, and only plain values (systemd shows anything odd as ``$'...'``); nothing is read from the
+    X authority file itself.  Empty if there is no systemd user manager.
+    """
+    tool = shutil.which("systemctl")
+    if not tool:
+        return {}
+    try:
+        done = subprocess.run([tool, "--user", "show-environment"], capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    if done.returncode != 0:
+        return {}
+    found: dict[str, str] = {}
+    for line in done.stdout.splitlines():
+        name, sep, value = line.partition("=")
+        if sep and name in DISPLAY_KEYS and value and not value.startswith(("$'", "'", '"')):
+            found[name] = value
+    return found
+
+
+def _display_usable(name: str, value: str, runtime: Path, sockets: Path) -> bool:
+    if name == "XAUTHORITY":
+        return Path(value).is_file()
+    if name == "WAYLAND_DISPLAY":
+        return (Path(value) if value.startswith("/") else runtime / value).exists()
+    local = re.fullmatch(r"(?:unix)?:(\d+)(?:\.\d+)?", value)
+    return True if local is None else (sockets / f"X{local.group(1)}").exists()  # (a remote display can't be checked from here)
+
+
+def session_display_env(
+    environ: dict[str, str] | None = None, manager: Callable[[], dict[str, str]] | None = None, sockets: Path = X11_SOCKETS,
+) -> dict[str, str | None]:
+    """The DISPLAY / WAYLAND_DISPLAY / XAUTHORITY to give him *now*, for ``spawn``'s ``env`` (``None`` means: take it out).
+
+    The watcher is started at login, maybe before the desktop has finished setting these up, and it can then run for days
+    across Xwayland restarts, each of which gets a new random X authority file.  So its own environment is only the fallback:
+    the session's current values win when they point at something that exists, then the inherited ones, and a
+    XAUTHORITY naming a file that is gone is removed rather than passed on (it can only cause "Authorization required").
+    Nothing is hard-coded and no cookie is read.
+    """
+    environ = dict(os.environ) if environ is None else environ
+    live = (_manager_environment if manager is None else manager)()
+    runtime = Path(environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
+    chosen: dict[str, str | None] = {}
+    for name in DISPLAY_KEYS:
+        candidates = [value for value in (live.get(name), environ.get(name)) if value]
+        usable = [value for value in candidates if _display_usable(name, value, runtime, sockets)]
+        if usable:
+            chosen[name] = usable[0]
+        elif name == "XAUTHORITY":
+            chosen[name] = None
+        else:
+            chosen[name] = candidates[0] if candidates else None  # (my check may be wrong for an unusual setup: don't throw the value away)
+    return chosen
+
+
+def wait_for_display(
+    log: Callable[[str], None] = lambda message: None, cancelled: Callable[[], bool] = lambda: False, timeout: float = DISPLAY_WAIT_SECONDS,
+    resolve: Callable[[], dict[str, str | None]] = session_display_env, sleep: Callable[[float], None] = lambda seconds: time.sleep(seconds),
+    clock: Callable[[], float] = lambda: time.monotonic(),
+) -> dict[str, str | None]:
+    """The display settings for a launch, waiting (a little) for the desktop to exist: after login it may not yet."""
+    deadline = clock() + timeout
+    told = False
+    while True:
+        found = resolve()
+        if found.get("DISPLAY"):
+            log(f"Display for him: {display_report(found)}")
+            return found
+        if clock() >= deadline or cancelled():
+            break
+        if not told:
+            told = True
+            log(f"The desktop isn't ready yet (no DISPLAY). Waiting up to {int(timeout)} seconds for it.")
+        sleep(1.0)
+    if found.get("WAYLAND_DISPLAY"):
+        log("There is a Wayland display but no X display (DISPLAY), which the desktop window needs: starting him anyway.")
+        return found
+    raise LaunchError("There is no display (DISPLAY/WAYLAND_DISPLAY). Is this running inside your desktop login? Check: python3 -m babyai.usbwatch status")
+
+
+def display_report(settings: dict[str, str | None], sockets: Path = X11_SOCKETS) -> str:
+    """One line for ``status``.  The X authority file is only reported as present or not: its name and contents stay out of output and logs."""
+    auth = settings.get("XAUTHORITY")
+    return (
+        f"DISPLAY={settings.get('DISPLAY') or '(not set)'}, WAYLAND_DISPLAY={settings.get('WAYLAND_DISPLAY') or '(not set)'}, "
+        f"X authority file: {'found' if auth else 'none (the default ~/.Xauthority is used)'}"
+    )
 
 
 def check_noexec(mount: Path, log: Callable[[str], None] = lambda message: None) -> bool:
@@ -891,7 +989,7 @@ def _clear_child_state() -> None:
         pass
 
 
-def launch_portable(pairing: dict[str, Any], directory: Path, log: Callable[[str], None]) -> Launched:
+def launch_portable(pairing: dict[str, Any], directory: Path, log: Callable[[str], None], cancelled: Callable[[], bool] = lambda: False) -> Launched:
     spec = str(pairing.get("drive", ""))
     device = device_for(spec)
     if device is None:
@@ -913,11 +1011,13 @@ def launch_portable(pairing: dict[str, Any], directory: Path, log: Callable[[str
         notify(message)
         raise LaunchError(message)
     python = choose_python(root, log)
-    check_display(log)
+    display = wait_for_display(log, cancelled)  # (right after login the drive can be in before the desktop is; the checks above don't need it)
+    if device_for(spec) is None:
+        raise LaunchError("The drive was taken out while I waited for the desktop.")
     check_noexec(mount, log)
     ollama = start_local_ollama(root, config, directory, log)
     try:
-        app = spawn([python, "-m", "babyai", "--desktop", "--config", str(config)], root, directory, _portable_env(root))
+        app = spawn([python, "-m", "babyai", "--desktop", "--config", str(config)], root, directory, {**display, **_portable_env(root)})
     except OSError:
         if ollama is not None:
             stop_process(ollama)
@@ -1015,21 +1115,21 @@ def cmd_run(args: argparse.Namespace) -> int:
         print("The USB watcher is already running.")
         return 0
     log = _log_to_file(directory)
+    done = threading.Event()
     log(f"Watching for {spec} ({'portable' if portable else 'key'} mode, config {config}).")
     if portable:
         present = lambda: is_present(spec)  # noqa: E731
-        launch = lambda: launch_portable(pairing, directory, log)  # noqa: E731
+        launch = lambda: launch_portable(pairing, directory, log, done.is_set)  # noqa: E731
         stop = stop_launched
     else:
         present = lambda: is_present(spec)  # noqa: E731
-        launch = lambda: spawn(launch_command(config), repo_root(), directory)  # noqa: E731
+        launch = lambda: spawn(launch_command(config), repo_root(), directory, wait_for_display(log, done.is_set))  # noqa: E731
         stop = stop_process
     watcher = Watcher(
         present, launch, stop,
         elsewhere=another_babyai_running, grace=float(settings.get("grace_seconds", 3)),
         launch_if_present=bool(settings.get("launch_if_present", True)), close_on_remove=bool(settings.get("close_on_remove", True)), log=log,
     )
-    done = threading.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: done.set())
     try:
@@ -1099,6 +1199,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         mount = mount_point(device) if device is not None else None
         print(f"App folder: {mount / str(pairing.get('app_folder') or 'BabyAI') if mount else '(drive not mounted)'}")
     print(f"Login item: {'installed' if autostart_path().exists() else 'not installed'} ({autostart_path()})")
+    print(f"Display he would get now: {display_report(session_display_env())}")
     print(f"Installed watcher: {stub_path() if stub_path().exists() else 'not installed'}")
     pid = running_watcher(state_dir())
     print(f"Watcher: {'running, pid ' + str(pid) if pid else 'not running'}")
@@ -1272,7 +1373,7 @@ def cmd_trust(args: argparse.Namespace) -> int:
     data = dict(pairing)
     data["trust"] = manifest(root)
     save_pairing(data, _pairing_path_from(args))
-    print(f"Trusted {len(data['trust'])} Python files. You can plug the drive in now.")
+    print(f"Trusted {len(data['trust'])} entries (Python files, git settings and bundled programs). You can plug the drive in now.")
     return 0
 
 
