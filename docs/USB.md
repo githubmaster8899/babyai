@@ -174,22 +174,54 @@ period.
 stick; the launcher's own log (`~/.local/state/babyai/usbwatch.log`) and the
 pairing record stay on the host.
 
-## What still needs real-drive testing
+## Real-drive check, 2026-11-14
 
-The test suite covers the fake `/dev/disk`, fake mountinfo, trust changes,
-copying, config rewriting, SQLite settings and atomic writes. These need a real
-stick and a desktop session:
+Checked on the `BENNY_S AI` vfat stick (114.4 GB, mounted at
+`/run/media/ItsBenny/BENNY_S AI`) from commit `dcc5d83`:
 
-* a fresh FAT32 stick through `make-drive` and `trust`;
-* plug, unplug, and replug with an app already running;
+* `make-drive --force --no-install --uuid 2154-5D47` replaced the app files in
+  an existing `BabyAI/` folder; the existing `data/` files kept their names,
+  sizes and mtimes.
+* The generated config contains only `[usb]` (no stale `[portable]` table).
+* A 92-file SHA-256 manifest matched every `.py` file on the stick.
+* Appending one line to a real `.py` file on the stick made `trust` list it
+  and refuse with exit 1; answering `yes` on a copy of the pairing approved it,
+  and restoring the file returned the real pairing to zero changes.
+* `launch_portable()` refused the edited file before starting a process, with
+  the "files on the drive changed … run trust" message.
+* The on-drive `data/memory.db` reports `journal_mode=DELETE`,
+  `synchronous=FULL`, `integrity_check=ok`, and has no `-wal`/`-shm` sidecars.
+* A text and a bytes atomic write on the stick left no `.tmp` file and were
+  removed afterwards.
+* `~/.local/share/babyai` and `~/.cache/babyai` were byte-for-byte unchanged
+  (listings and SHA-256) after `make-drive` and the checks.
+* `capri/LICENSE.md`, `NOTICE` and `LICENSE` match the host copies; no
+  `__pycache__` or `.pyc` files were copied to the stick.
+* With the stick unplugged, `status` reports "Drive plugged in now: no" and
+  the watcher is not running.
+
+The shell used for this check hides `/dev/disk` and `/dev/sdb1`, so the real
+`trust` command was exercised through the same functions with a temporary
+fake `/dev/disk` symlink and mountinfo entry. The files it checked were the
+real files on the stick.
+
+### Not tested on this run
+
+These still need a real desktop session and a real `/dev/disk`:
+
+* a **fresh, empty** stick (this run used an existing `BabyAI/` with `--force`);
+* starting the Tk app from the stick (Tkinter is not installed here);
 * remembering a fact and setting a reminder while the app is up;
-* pulling the stick mid-use and checking the app exits and the database is
-  readable on the next mount;
-* KDE's Safely Remove reporting the drive busy, then the Eject USB menu;
+* unplug/replug with the app running, pulling the stick mid-use, and a
+  post-removal database read;
+* KDE's Safely Remove reporting the drive busy, the Eject USB menu, and
+  `udisksctl` unmount;
 * logout/login with the stick in, and a session with no stick;
-* editing a `.py` on the stick and confirming the launch refusal and `trust`;
-* confirming `~/.local/share/babyai` and `~/.cache/babyai` are unchanged while
-  the portable copy runs.
+* installing/starting the real login item and watcher (run was `--no-install`);
+* optional `<root>/runtime/bin/python3` and `<root>/ollama/bin/ollama`;
+* Python 3.11 (only 3.14.9 was available here), ruff, `xvfb-run`, and
+  Tk-dependent tests;
+* macOS and Windows.
 
 FAT32 has no real Unix execute bits, fakes ownership, is case-insensitive and
 has a 4 GB per-file limit. The app is marked `PYTHONDONTWRITEBYTECODE=1` so it
