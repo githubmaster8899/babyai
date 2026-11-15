@@ -962,6 +962,53 @@ class PortableMakeDriveTests(PortableDisk):
         (self.source / "LICENSE").write_text("licence")
         (self.source / "NOTICE").write_text("notice")
 
+    def test_data_copy_preserves_existing_usb_files_by_default(self) -> None:
+        source_data = self.home / "source-data"
+        destination = self.app / "data"
+
+        (source_data / "habits").mkdir(parents=True)
+        (source_data / "personality").mkdir()
+        (source_data / "self" / "worktrees").mkdir(parents=True)
+
+        (source_data / "habits" / "profile.txt").write_text("computer version")
+        (source_data / "personality" / "new.txt").write_text("new file")
+        (source_data / "self" / "settings.txt").write_text("computer settings")
+
+        (destination / "habits" / "profile.txt").write_text("USB version")
+        (destination / "habits" / "usb-only.txt").write_text("keep this")
+        (destination / "self" / "settings.txt").write_text("USB settings")
+
+        usbwatch._copy_data(source_data, destination, False, lambda _: None)
+
+        self.assertEqual((destination / "habits" / "profile.txt").read_text(), "USB version")
+        self.assertEqual((destination / "habits" / "usb-only.txt").read_text(), "keep this")
+        self.assertEqual((destination / "personality" / "new.txt").read_text(), "new file")
+        self.assertEqual((destination / "self" / "settings.txt").read_text(), "USB settings")
+        self.assertFalse((destination / "self" / "worktrees").exists())
+
+    def test_overwrite_data_replaces_matching_files_but_keeps_usb_only_files(self) -> None:
+        source_data = self.home / "source-data"
+        destination = self.app / "data"
+
+        (source_data / "habits").mkdir(parents=True)
+        (source_data / "habits" / "profile.txt").write_text("computer version")
+
+        (destination / "habits" / "profile.txt").write_text("USB version")
+        (destination / "habits" / "usb-only.txt").write_text("keep this")
+
+        (source_data / "memory.db").write_text("source database")
+        (destination / "memory.db").write_text("existing database")
+
+        with mock.patch.object(usbwatch, "_copy_memory_database", return_value=True) as copy_memory:
+            usbwatch._copy_data(source_data, destination, False, lambda _: None)
+            copy_memory.assert_not_called()
+
+            usbwatch._copy_data(source_data, destination, True, lambda _: None)
+            copy_memory.assert_called_once()
+
+        self.assertEqual((destination / "habits" / "profile.txt").read_text(), "computer version")
+        self.assertEqual((destination / "habits" / "usb-only.txt").read_text(), "keep this")
+
     def test_it_refuses_a_non_empty_app_folder_without_force(self) -> None:
         self.app.mkdir(parents=True, exist_ok=True)
         (self.app / "old.txt").write_text("old")
