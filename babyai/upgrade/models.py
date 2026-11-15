@@ -9,7 +9,6 @@ session and written to ``config.toml`` so it is still the one next time.
 from __future__ import annotations
 
 import json
-import os
 import re
 import urllib.error
 import urllib.request

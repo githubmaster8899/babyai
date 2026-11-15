@@ -15,7 +15,7 @@ import tempfile
 import threading
 import time
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from unittest import mock
@@ -948,6 +948,21 @@ class PortableTrustTests(PortableDisk):
     def test_a_manifest_that_is_missing_refuses_until_trusted(self) -> None:
         pairing = {key: value for key, value in self.pairing.items() if key != "trust"}
         self.assertTrue(usbwatch.trust_changes(pairing, self.app)[0].startswith("(no trust manifest"))
+
+    def test_a_missing_file_is_listed_and_cannot_be_trusted_without_input(self) -> None:
+        (self.app / "babyai" / "a.py").unlink()
+        before = usbwatch.load_pairing(self.pairing_path)
+        out = StringIO()
+        with redirect_stdout(out), mock.patch("builtins.input", side_effect=EOFError):
+            code = usbwatch.main(["trust", "--pairing", str(self.pairing_path)])
+        self.assertEqual(code, 1)
+        self.assertIn("babyai/a.py", out.getvalue())
+        self.assertEqual(usbwatch.load_pairing(self.pairing_path), before)
+
+    def test_there_is_no_non_interactive_trust_flag(self) -> None:
+        with self.assertRaises(SystemExit), redirect_stderr(StringIO()):
+            usbwatch.build_parser().parse_args(["trust", "--yes"])
+
 
 
 class PortableMakeDriveTests(PortableDisk):
