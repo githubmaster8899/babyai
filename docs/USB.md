@@ -93,8 +93,11 @@ python3 -m babyai.usbwatch make-drive "/run/media/you/BENNY"
 * records the SHA-256 manifest and installs/starts the host watcher.
 
 Useful options: `--data-from PATH`, `--no-data`, `--overwrite-data`,
-`--app-folder NAME`, `--uuid UUID`, and `--no-install`. The default app folder is `BabyAI`; the mount point may contain
-spaces.
+`--app-folder NAME`, `--uuid UUID`, and `--no-install`. By default, existing files
+on the stick are preserved and only missing data files are copied. `--overwrite-data`
+replaces matching files from the computer while keeping USB-only files. `--no-data`
+skips the data copy entirely. The default app folder is `BabyAI`; the mount point
+may contain spaces.
 
 The launcher resolves the stick by filesystem UUID, waits about 20 seconds for
 the desktop to automount it, and only then falls back to `udisksctl mount`. It
@@ -135,7 +138,8 @@ Use the right-click **Eject USB** menu in the overlay. It:
 
 1. verifies the pid is the BabyAI instance for this drive before stopping it;
 2. stops the bundled Ollama if the current watcher started one;
-3. stops the watcher;
+3. leaves the host watcher running so it can detect the drive's removal
+   and launch BabyAI again when the drive is reinserted;
 4. runs `udisksctl unmount -b <device>`, retrying for a short while if the
    desktop is still busy.
 
