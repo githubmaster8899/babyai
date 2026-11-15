@@ -48,6 +48,7 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -67,7 +68,11 @@ POLL_SECONDS = 1.0
 STOP_WAIT_SECONDS = 5.0  # how long he gets to close politely before he is made to
 MAX_LOG_BYTES = 1_000_000
 SAFE_PATH = re.compile(r"[A-Za-z0-9_@+=:,./ -]+")  # what may go into an autostart Exec line without quoting rules to get wrong
-SKIP_PARTS = frozenset({"data", "runtime", "ollama", ".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"})
+# What the manifest covers (the same rules as babyai/portable.py, which has to be kept in step: tests compare the two).
+SKIP_DIRS = frozenset({".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"})  # (anywhere in the tree)
+TOP_SKIPPED = frozenset({"data", "runtime", "ollama"})  # (only at the top: his data, and the bundles covered by TREES)
+TREES = ("runtime", "ollama/bin")  # bundled programs: if they are on the stick they run as him, so they are in the manifest
+GIT_FILES = (".git/config", ".git/info/attributes")  # what git runs on its own: config (fsmonitor, hooks path...) and hooks
 PAIRING_NAME = "pairing.toml"
 
 
@@ -664,24 +669,45 @@ def _sha256(path: Path) -> str:
 
 
 def manifest(root: Path) -> dict[str, str]:
+    """SHA-256 for everything on the stick that can run as him: every Python file, the git files that git would run
+    (config and hooks), and, if they are there, the bundled Python and Ollama programs (one digest each for the tree)."""
     root = root.resolve()
     found: dict[str, str] = {}
-    try:
-        files = sorted(root.rglob("*.py"))
-    except OSError:
-        return found
-    for path in files:
-        try:
-            relative = path.relative_to(root).as_posix()
-        except ValueError:
-            continue
-        if any(part in SKIP_PARTS for part in relative.split("/")):
-            continue
-        try:
-            found[relative] = _sha256(path)
-        except OSError:
-            continue
+    for folder, names, files in os.walk(root):
+        here = Path(folder)
+        top = here == root
+        names[:] = sorted(name for name in names if name not in SKIP_DIRS and not (top and name in TOP_SKIPPED))
+        for name in sorted(files):
+            if name.endswith(".py"):
+                _record(found, root, here / name)
+    for name in GIT_FILES:
+        _record(found, root, root / name)
+    hooks = root / ".git" / "hooks"
+    if hooks.is_dir():
+        for path in sorted(hooks.iterdir()):
+            if path.is_file() and not path.name.endswith(".sample"):
+                _record(found, root, path)
+    for tree in TREES:
+        if (root / tree).is_dir():
+            found[tree + "/"] = _tree_digest(root / tree)
     return found
+
+
+def _record(found: dict[str, str], root: Path, path: Path) -> None:
+    try:
+        found[path.relative_to(root).as_posix()] = _sha256(path)
+    except (OSError, ValueError):
+        pass
+
+
+def _tree_digest(folder: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(item for item in folder.rglob("*") if item.is_file()):
+        try:
+            digest.update(path.relative_to(folder).as_posix().encode() + b"\0" + _sha256(path).encode() + b"\n")
+        except OSError:
+            digest.update(b"unreadable\n")
+    return digest.hexdigest()
 
 
 def trust_changes(pairing: dict[str, Any], root: Path) -> list[str]:
@@ -761,12 +787,18 @@ def check_noexec(mount: Path, log: Callable[[str], None] = lambda message: None)
     return True
 
 
+def _pycache_prefix() -> str:
+    """A stale or planted .pyc on the stick would run without its source being looked at, so none on the stick is ever read."""
+    return str(Path(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()) / f"babyai-pycache-{os.getuid()}")
+
+
 def _portable_env(root: Path) -> dict[str, str]:
     return {
         "BABYAI_HOME": str(root),
         "BABYAI_PAIRING": str(pairing_path()),
         "PYTHONPATH": str(root),
         "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONPYCACHEPREFIX": _pycache_prefix(),  # compiled files are looked for here (empty), never in __pycache__ on the stick
         "XDG_CACHE_HOME": str(root / "data" / "cache"),
     }
 
@@ -1193,6 +1225,11 @@ def cmd_pair(args: argparse.Namespace) -> int:
     return cmd_install(args)
 
 
+def _can_ask() -> bool:
+    """Trusting changed files is the user's call alone: it is only asked at a real keyboard."""
+    return sys.stdin.isatty()
+
+
 def cmd_trust(args: argparse.Namespace) -> int:
     pairing, _config, portable = _load_context(args)
     if not portable:
@@ -1218,11 +1255,13 @@ def cmd_trust(args: argparse.Namespace) -> int:
         else:
             print("Everything in the app folder matches the trusted copy.")
             return 0
-    print("These Python files are new, changed or missing since the last trust:")
+    print("These files are new, changed or missing since the last trust:")
     for name in changed:
         print(f"  {name}")
-    # Trust is deliberately interactive: no command-line flag may turn a
-    # model- or script-issued command into approval of changed executable code.
+    # Trust is deliberately interactive: no flag, and no script or model-issued command, may approve changed code.
+    if not _can_ask():
+        print("Run this yourself in a terminal: the yes has to come from your keyboard, never from a script or from him.")
+        return 1
     try:
         answer = input("Trust them and update the manifest? [y/N] ")
     except EOFError:
@@ -1317,6 +1356,25 @@ def _copy_data(source: Path, destination: Path, overwrite: bool, log: Callable[[
             log(f"Could not copy {memory}; starting with an empty memory.")
 
 
+FAT_LIKE = frozenset({"vfat", "msdos", "exfat", "ntfs", "ntfs3", "fuseblk"})  # (no real file modes: every file shows as executable)
+
+
+def _git_ignore_file_modes(root: Path, log: Callable[[str], None]) -> None:
+    """Without this git sees every file on a FAT stick as edited, and self-upgrade refuses to run on a "dirty" folder."""
+    tool = shutil.which("git")
+    config = root / ".git" / "config"
+    if not tool or not config.is_file():
+        log("git isn't installed here, so I could not set core.fileMode=false on the stick's copy; do it once there before an upgrade.")
+        return
+    try:
+        done = subprocess.run([tool, "config", "--file", str(config), "core.fileMode", "false"], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log(f"Could not set core.fileMode=false on the stick's copy: {exc}")
+        return
+    if done.returncode != 0:
+        log(f"Could not set core.fileMode=false on the stick's copy: {done.stderr.strip()}")
+
+
 def _portable_config_text(source_config: Path | None, spec: str, app_folder: str) -> str:
     text = source_config.read_text() if source_config and source_config.is_file() else ""
     text = set_toml_value(text, "usb", "drive", spec)
@@ -1381,6 +1439,8 @@ def cmd_make_drive(args: argparse.Namespace) -> int:
     if not args.no_git and (source / ".git").is_dir():
         log("Copying .git/ (self-upgrade needs it; use --no-git to skip) ...")
         _copy_tree(source / ".git", root / ".git")
+        if found.fstype in FAT_LIKE:
+            _git_ignore_file_modes(root, log)
     config = root / "config.toml"
     source_config = source / "config.toml"
     _write_text_atomic(config, _portable_config_text(source_config, spec, app_folder))
@@ -1475,8 +1535,7 @@ def cmd_eject(args: argparse.Namespace) -> int:
             ollama_pid = None
         if ollama_pid is not None and _is_the_ollama(ollama_pid, root):
             stop_pid(ollama_pid)
-    # Keep the host watcher alive. It must continue watching after an eject so
-    # reinserting the stick can start BabyAI again without a login/logout.
+    # Keep the host watcher alive: it must continue watching after an eject so reinserting the stick starts him again.
     _clear_child_state()
     udisksctl = shutil.which("udisksctl")
     if not udisksctl:

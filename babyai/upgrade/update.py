@@ -108,7 +108,7 @@ class VersionUpdates:
         before = git(repo, "rev-parse", "HEAD")
         git(repo, "merge", "--ff-only", "-q", tip)
         try:  # the user approved this update; keep the portable trust manifest in step
-            portable.refresh_trust(git(repo, "diff", "--name-only", f"{before}..{tip}").splitlines())
+            portable.refresh_trust(git(repo, "diff", "--name-only", f"{before}..{tip}").splitlines(), repo)
         except OSError:
             pass
         data = self.journal.load()
@@ -145,7 +145,7 @@ class VersionUpdates:
             )
         git(repo, "reset", "--hard", "-q", entry["before"])
         try:  # the user approved the rollback; the trusted copy is now this one
-            portable.refresh_trust(git(repo, "diff", "--name-only", f"{entry['after']}..{entry['before']}").splitlines())
+            portable.refresh_trust(git(repo, "diff", "--name-only", f"{entry['after']}..{entry['before']}").splitlines(), repo)
         except OSError:
             pass
         data = self.journal.load()
