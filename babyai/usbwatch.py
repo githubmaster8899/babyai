@@ -1278,15 +1278,37 @@ def _copy_memory_database(source: Path, destination: Path) -> bool:
 
 
 def _copy_data(source: Path, destination: Path, overwrite: bool, log: Callable[[str], None]) -> None:
-    for name in ("habits", "personality", "reminders"):
+    ignored_patterns = shutil.ignore_patterns(
+        "__pycache__", "*.pyc", ".pytest_cache", ".mypy_cache",
+        ".ruff_cache", "*.tmp",
+    )
+    self_dir = source / "self"
+
+    def ignore_data(directory: str, names: list[str]) -> set[str]:
+        ignored = set(ignored_patterns(directory, names))
+        if Path(directory) == self_dir:
+            ignored.add("worktrees")
+        return ignored
+
+    def copy_data_file(src: str, dst: str) -> str:
+        target = Path(dst)
+        if overwrite or not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dst)
+        return dst
+
+    for name in ("habits", "personality", "reminders", "self"):
         folder = source / name
         if folder.is_dir():
-            _copy_tree(folder, destination / name)
-    self_dir = source / "self"
-    if self_dir.is_dir():
-        def ignore_worktrees(directory: str, names: list[str]) -> set[str]:
-            return {"worktrees"} if Path(directory) == self_dir else set()
-        shutil.copytree(self_dir, destination / "self", dirs_exist_ok=True, symlinks=False, copy_function=shutil.copyfile, ignore=ignore_worktrees)
+            shutil.copytree(
+                folder,
+                destination / name,
+                dirs_exist_ok=True,
+                symlinks=False,
+                copy_function=copy_data_file,
+                ignore=ignore_data,
+            )
+
     memory = source / "memory.db"
     if memory.is_file() and (overwrite or not (destination / "memory.db").exists()):
         if _copy_memory_database(memory, destination / "memory.db"):
@@ -1500,7 +1522,7 @@ def build_parser() -> argparse.ArgumentParser:
     make = sub.add_parser("make-drive", parents=[common], help="copy BabyAI, its assets, config and data to a mounted drive and pair it")
     make.add_argument("mount", help="the mounted folder of the drive, e.g. /run/media/you/BENNY")
     make.add_argument("--force", action="store_true", help="write into a non-empty BabyAI folder")
-    make.add_argument("--overwrite-data", action="store_true", help="replace an existing memory.db on the drive")
+    make.add_argument("--overwrite-data", action="store_true", help="replace existing copied data files on the drive")
     make.add_argument("--no-data", action="store_true", help="do not copy memory, habits, personality or self-upgrade notes")
     make.add_argument("--data-from", help="where to copy data from (default: ~/.local/share/babyai)")
     make.add_argument("--source", help="the checkout to copy (default: this one)")
