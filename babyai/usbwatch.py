@@ -1103,6 +1103,20 @@ def cmd_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _current_trust(pairing: dict[str, Any], pairing_file: Path) -> dict[str, Any]:
+    """``pairing`` with the trust manifest as it is on disk *now*.
+
+    The watcher runs for days, and ``trust`` rewrites the pairing file while it does: a launch that used the copy read at start-up would
+    keep refusing files the person has just trusted.  Only the manifest is taken, and only if the file is still for the same drive;
+    an unreadable or different file leaves what the watcher already has.
+    """
+    fresh = load_pairing(pairing_file)
+    manifest_now = fresh.get("trust")
+    if fresh.get("drive") != pairing.get("drive") or not isinstance(manifest_now, dict) or not manifest_now:
+        return pairing
+    return {**pairing, "trust": manifest_now}
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     pairing, config, portable = _load_context(args)
     spec = _paired_spec(pairing, config)
@@ -1119,7 +1133,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     log(f"Watching for {spec} ({'portable' if portable else 'key'} mode, config {config}).")
     if portable:
         present = lambda: is_present(spec)  # noqa: E731
-        launch = lambda: launch_portable(pairing, directory, log, done.is_set)  # noqa: E731
+        pairing_file = _pairing_path_from(args)
+        launch = lambda: launch_portable(_current_trust(pairing, pairing_file), directory, log, done.is_set)  # noqa: E731
         stop = stop_launched
     else:
         present = lambda: is_present(spec)  # noqa: E731

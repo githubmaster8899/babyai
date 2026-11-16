@@ -179,7 +179,9 @@ A stick paired before the manifest grew to cover git's settings and the bundled
 programs will, the first time after the launcher is updated, list `.git/config`
 (and any hooks or bundled programs) as new and refuse to launch. That is expected:
 look at the list, then run `python3 -m babyai.usbwatch trust` once in a terminal
-and answer `y`.
+and answer `y`. The running watcher reads the manifest again at its next launch, so
+there is nothing to restart: unplug and replug the stick (or restart the watcher
+with `install`, which launches at once if the stick is in).
 
 ## Removing the stick safely
 

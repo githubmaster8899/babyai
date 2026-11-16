@@ -944,6 +944,48 @@ class PortableDisk(Disk):
         return {"pairing": str(self.pairing_path)}
 
 
+class TrustReachesTheRunningWatcherTests(PortableDisk):
+    """``trust`` rewrites the pairing file while the watcher is running; the next launch has to use it, with no restart."""
+
+    def watcher(self) -> Watcher:
+        seen: list[Watcher] = []
+        with mock.patch.object(usbwatch, "watch", lambda watcher, *a, **k: seen.append(watcher)), mock.patch.object(usbwatch.signal, "signal"):
+            code, out = self.run_cli("run", "--pairing", str(self.pairing_path), "--config", str(self.app / "config.toml"))
+        self.assertEqual((code, seen != []), (0, True), out)
+        return seen[0]
+
+    def launched_with(self, watcher: Watcher) -> dict[str, object]:
+        with mock.patch.object(usbwatch, "launch_portable") as launch:
+            watcher._launch_fn()
+        return launch.call_args.args[0]
+
+    def test_a_trust_given_after_the_watcher_started_is_used_by_the_next_launch(self) -> None:
+        watcher = self.watcher()  # (started with the manifest as it is now)
+        (self.app / ".git").mkdir()
+        (self.app / ".git" / "config").write_text("[core]\n")
+        self.assertEqual(usbwatch.trust_changes(self.launched_with(watcher), self.app), [".git/config"])  # (not trusted yet: refuses)
+        with redirect_stdout(StringIO()), mock.patch("builtins.input", return_value="y"), mock.patch.object(usbwatch, "_can_ask", return_value=True):
+            self.assertEqual(usbwatch.main(["trust", "--pairing", str(self.pairing_path)]), 0)
+        self.assertEqual(usbwatch.trust_changes(self.launched_with(watcher), self.app), [])  # (trusted: no restart needed)
+
+    def test_the_drive_and_folder_stay_the_ones_the_watcher_started_with(self) -> None:
+        watcher = self.watcher()
+        usbwatch.save_pairing({**self.pairing, "drive": "uuid:OTHER-0000", "app_folder": "Elsewhere", "trust": {"x.py": "0" * 64}}, self.pairing_path)
+        got = self.launched_with(watcher)
+        self.assertEqual((got["drive"], got["app_folder"]), ("uuid:ABCD-1234", "BabyAI"))
+        self.assertEqual(got["trust"], self.pairing["trust"])  # (a manifest for some other drive is not taken)
+        usbwatch.save_pairing({**self.pairing, "app_folder": "Elsewhere", "trust": {"y.py": "1" * 64}}, self.pairing_path)
+        got = self.launched_with(watcher)
+        self.assertEqual((got["app_folder"], got["trust"]), ("BabyAI", {"y.py": "1" * 64}))  # (same drive: only the manifest is new)
+
+    def test_a_pairing_file_that_is_gone_or_garbled_leaves_what_the_watcher_has(self) -> None:
+        watcher = self.watcher()
+        self.pairing_path.write_text("this is [not toml")
+        self.assertEqual(self.launched_with(watcher)["trust"], self.pairing["trust"])
+        self.pairing_path.unlink()
+        self.assertEqual(self.launched_with(watcher)["trust"], self.pairing["trust"])
+
+
 class PortableTrustTests(PortableDisk):
     def test_a_changed_python_file_is_listed_and_refuses_launch(self) -> None:
         (self.app / "babyai" / "a.py").write_text("A = 2\n")
