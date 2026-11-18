@@ -161,6 +161,14 @@ class ProtectedPathTests(unittest.TestCase):
         for name in ("trust", "eject", "eject_usb", "make_drive", "usbwatch"):
             self.assertNotIn(name, registry.tools)
 
+    def test_he_cannot_run_the_usb_launcher_or_read_its_checksums_through_the_shell(self):
+        # trust, eject, make-drive and the pairing record decide what runs from the stick: only the user touches them.
+        gate = SafetyGate(level="permissive")
+        for command in ("python3 -m babyai.usbwatch trust", "python3 ~/.local/share/babyai-usb/usbwatch.py eject --pid 1",
+                        "cat ~/.config/babyai-usb/pairing.toml", "echo x >> ~/.config/babyai-usb/pairing.toml", "PYTHON3 -m BabyAI.UsbWatch make-drive /mnt"):
+            result = gate.check("run_shell", {"command": command}, interactive=True)
+            self.assertEqual(result["decision"], "deny", command)
+
     def test_every_rule_is_something_that_exists_in_the_repo(self):
         root = Path(__file__).resolve().parents[1]
         for rule in PROTECTED:

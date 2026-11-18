@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -15,7 +16,7 @@ import tempfile
 import threading
 import time
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from unittest import mock
@@ -74,6 +75,8 @@ class Disk(unittest.TestCase):
             mock.patch.object(usbwatch, "DISK", self.base / "disk"),
             mock.patch.object(usbwatch, "SYS_BLOCK", self.base / "sys"),
             mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(self.home / "state"), "XDG_CONFIG_HOME": str(self.home / "cfg"), "XDG_DATA_HOME": str(self.home / "data")}),
+            mock.patch.object(usbwatch, "_manager_environment", return_value={}),  # (the real systemd user manager is never asked)
+            mock.patch.object(usbwatch, "wait_for_watcher", return_value=None),  # (install does not wait for a watcher that the test never starts)
         ]
         for patch in patches:
             patch.start()
@@ -495,6 +498,13 @@ class SpawnTests(Disk):
         with self.assertRaises(OSError):
             usbwatch.spawn(["/no/such/python", "-m", "babyai"], ROOT, self.home / "state")
 
+    def test_a_value_of_none_takes_a_variable_out_of_his_environment(self) -> None:
+        directory = self.home / "state"
+        code = "import os; print(os.environ.get('XAUTHORITY', 'gone'), os.environ.get('MINE', 'unset'))"
+        with mock.patch.dict(os.environ, {"XAUTHORITY": "/old/stale"}):
+            usbwatch.spawn([sys.executable, "-c", code], ROOT, directory, {"XAUTHORITY": None, "MINE": "yes"}).wait(timeout=10)
+        self.assertEqual((directory / "babyai-from-usb.log").read_text().strip(), "gone yes")
+
     def test_his_log_does_not_grow_without_end(self) -> None:
         directory = self.home / "state"
         directory.mkdir()
@@ -765,6 +775,18 @@ class StatusTests(Disk):
         make_disk(self.base)
         self.assertIn("Drive plugged in now: yes", self.run_cli("status", "--config", str(self.config))[1])
 
+    def test_it_says_which_display_he_would_get_without_giving_away_the_authority_file(self) -> None:
+        cookie = self.home / "xauth_private_name"
+        cookie.write_text("SECRETCOOKIE")
+        outside = {key: value for key, value in os.environ.items() if key not in usbwatch.DISPLAY_KEYS}  # (a real X server in the test run must not leak in)
+        with mock.patch.dict(os.environ, outside, clear=True):
+            with mock.patch.object(usbwatch, "_manager_environment", return_value={"DISPLAY": ":0", "XAUTHORITY": str(cookie)}):
+                out = self.run_cli("status", "--config", str(self.config))[1]
+        self.assertIn("DISPLAY=:0", out)
+        self.assertIn("X authority file: found", out)
+        self.assertNotIn("SECRETCOOKIE", out)
+        self.assertNotIn("xauth_private_name", out)
+
     def test_it_shows_the_end_of_the_log(self) -> None:
         directory = self.home / "state" / "babyai"
         directory.mkdir(parents=True)
@@ -809,6 +831,9 @@ class OneWatcherTests(Disk):
         watcher = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "babyai.usbwatch"])
         self.addCleanup(reap, watcher)
         (directory / "usbwatch.pid").write_text(f"{watcher.pid}\n")
+        deadline = time.monotonic() + 10  # (until the new process has really become python: before that /proc shows its parent's command line)
+        while time.monotonic() < deadline and b"babyai.usbwatch" not in Path(f"/proc/{watcher.pid}/cmdline").read_bytes():
+            time.sleep(0.02)
         self.assertEqual(usbwatch.running_watcher(directory), watcher.pid)
         stopper = threading.Thread(target=watcher.wait)  # (reaps it, so it does not stay as a zombie that still looks alive)
         stopper.start()
@@ -854,12 +879,13 @@ class RunTests(Disk):
         usbwatch.write_setting(self.config, "usb", "drive", "uuid:ABCD-1234")
         _, _, watcher = self.run_it()
         assert watcher is not None
-        with mock.patch.object(usbwatch, "spawn") as spawn:
+        with mock.patch.object(usbwatch, "spawn") as spawn, mock.patch.object(usbwatch, "wait_for_display", return_value={"DISPLAY": ":0"}):
             watcher._launch_fn()
-        command, cwd, directory = spawn.call_args.args
+        command, cwd, directory, env = spawn.call_args.args
         self.assertEqual(command, [sys.executable, "-m", "babyai", "--desktop", "--config", str(self.config.resolve())])
         self.assertEqual(cwd, ROOT)
         self.assertEqual(directory, self.home / "state" / "babyai")
+        self.assertEqual(env, {"DISPLAY": ":0"})  # (the session's current display, not what the watcher started with)
 
     def test_it_says_so_when_a_watcher_is_already_running(self) -> None:
         usbwatch.write_setting(self.config, "usb", "drive", "uuid:ABCD-1234")
@@ -919,6 +945,48 @@ class PortableDisk(Disk):
         return {"pairing": str(self.pairing_path)}
 
 
+class TrustReachesTheRunningWatcherTests(PortableDisk):
+    """``trust`` rewrites the pairing file while the watcher is running; the next launch has to use it, with no restart."""
+
+    def watcher(self) -> Watcher:
+        seen: list[Watcher] = []
+        with mock.patch.object(usbwatch, "watch", lambda watcher, *a, **k: seen.append(watcher)), mock.patch.object(usbwatch.signal, "signal"):
+            code, out = self.run_cli("run", "--pairing", str(self.pairing_path), "--config", str(self.app / "config.toml"))
+        self.assertEqual((code, seen != []), (0, True), out)
+        return seen[0]
+
+    def launched_with(self, watcher: Watcher) -> dict[str, object]:
+        with mock.patch.object(usbwatch, "launch_portable") as launch:
+            watcher._launch_fn()
+        return launch.call_args.args[0]
+
+    def test_a_trust_given_after_the_watcher_started_is_used_by_the_next_launch(self) -> None:
+        watcher = self.watcher()  # (started with the manifest as it is now)
+        (self.app / ".git").mkdir()
+        (self.app / ".git" / "config").write_text("[core]\n")
+        self.assertEqual(usbwatch.trust_changes(self.launched_with(watcher), self.app), [".git/config"])  # (not trusted yet: refuses)
+        with redirect_stdout(StringIO()), mock.patch("builtins.input", return_value="y"), mock.patch.object(usbwatch, "_can_ask", return_value=True):
+            self.assertEqual(usbwatch.main(["trust", "--pairing", str(self.pairing_path)]), 0)
+        self.assertEqual(usbwatch.trust_changes(self.launched_with(watcher), self.app), [])  # (trusted: no restart needed)
+
+    def test_the_drive_and_folder_stay_the_ones_the_watcher_started_with(self) -> None:
+        watcher = self.watcher()
+        usbwatch.save_pairing({**self.pairing, "drive": "uuid:OTHER-0000", "app_folder": "Elsewhere", "trust": {"x.py": "0" * 64}}, self.pairing_path)
+        got = self.launched_with(watcher)
+        self.assertEqual((got["drive"], got["app_folder"]), ("uuid:ABCD-1234", "BabyAI"))
+        self.assertEqual(got["trust"], self.pairing["trust"])  # (a manifest for some other drive is not taken)
+        usbwatch.save_pairing({**self.pairing, "app_folder": "Elsewhere", "trust": {"y.py": "1" * 64}}, self.pairing_path)
+        got = self.launched_with(watcher)
+        self.assertEqual((got["app_folder"], got["trust"]), ("BabyAI", {"y.py": "1" * 64}))  # (same drive: only the manifest is new)
+
+    def test_a_pairing_file_that_is_gone_or_garbled_leaves_what_the_watcher_has(self) -> None:
+        watcher = self.watcher()
+        self.pairing_path.write_text("this is [not toml")
+        self.assertEqual(self.launched_with(watcher)["trust"], self.pairing["trust"])
+        self.pairing_path.unlink()
+        self.assertEqual(self.launched_with(watcher)["trust"], self.pairing["trust"])
+
+
 class PortableTrustTests(PortableDisk):
     def test_a_changed_python_file_is_listed_and_refuses_launch(self) -> None:
         (self.app / "babyai" / "a.py").write_text("A = 2\n")
@@ -929,7 +997,7 @@ class PortableTrustTests(PortableDisk):
     def test_the_trust_command_prints_the_change_and_the_yes_updates_the_manifest(self) -> None:
         (self.app / "babyai" / "a.py").write_text("A = 2\n")
         out = StringIO()
-        with redirect_stdout(out), mock.patch("builtins.input", return_value="yes"):
+        with redirect_stdout(out), mock.patch("builtins.input", return_value="yes"), mock.patch.object(usbwatch, "_can_ask", return_value=True):
             code = usbwatch.main(["trust", "--pairing", str(self.pairing_path)])
         self.assertEqual(code, 0, out.getvalue())
         self.assertIn("babyai/a.py", out.getvalue())
@@ -940,7 +1008,7 @@ class PortableTrustTests(PortableDisk):
     def test_a_no_leaves_the_manifest_alone(self) -> None:
         (self.app / "babyai" / "a.py").write_text("A = 2\n")
         before = usbwatch.load_pairing(self.pairing_path)
-        with redirect_stdout(StringIO()), mock.patch("builtins.input", return_value="no"):
+        with redirect_stdout(StringIO()), mock.patch("builtins.input", return_value="no"), mock.patch.object(usbwatch, "_can_ask", return_value=True):
             code = usbwatch.main(["trust", "--pairing", str(self.pairing_path)])
         self.assertEqual(code, 1)
         self.assertEqual(usbwatch.load_pairing(self.pairing_path), before)
@@ -948,6 +1016,21 @@ class PortableTrustTests(PortableDisk):
     def test_a_manifest_that_is_missing_refuses_until_trusted(self) -> None:
         pairing = {key: value for key, value in self.pairing.items() if key != "trust"}
         self.assertTrue(usbwatch.trust_changes(pairing, self.app)[0].startswith("(no trust manifest"))
+
+    def test_a_missing_file_is_listed_and_cannot_be_trusted_without_input(self) -> None:
+        (self.app / "babyai" / "a.py").unlink()
+        before = usbwatch.load_pairing(self.pairing_path)
+        out = StringIO()
+        with redirect_stdout(out), mock.patch("builtins.input", side_effect=EOFError):
+            code = usbwatch.main(["trust", "--pairing", str(self.pairing_path)])
+        self.assertEqual(code, 1)
+        self.assertIn("babyai/a.py", out.getvalue())
+        self.assertEqual(usbwatch.load_pairing(self.pairing_path), before)
+
+    def test_there_is_no_non_interactive_trust_flag(self) -> None:
+        with self.assertRaises(SystemExit), redirect_stderr(StringIO()):
+            usbwatch.build_parser().parse_args(["trust", "--yes"])
+
 
 
 class PortableMakeDriveTests(PortableDisk):
@@ -1091,5 +1174,500 @@ class EndToEndTests(Disk):
         until(lambda: watcher.child is not None and watcher.child is not process and watcher.child.poll() is None, "he did not start again on the next plug-in")
 
 
+# ---------------------------------------------------------------------------------------------- what review found
+
+
+class TrustNeedsAKeyboardTests(PortableDisk):
+    """Trusting changed files is the user's call: a script, or he himself through a shell, cannot say yes."""
+
+    def test_without_a_keyboard_nothing_is_trusted_and_it_says_why(self) -> None:
+        (self.app / "babyai" / "a.py").write_text("A = 2\n")
+        before = usbwatch.load_pairing(self.pairing_path)
+        with mock.patch.object(usbwatch, "_can_ask", return_value=False), mock.patch("builtins.input", return_value="yes") as ask:
+            code, out = self.run_cli("trust", "--pairing", str(self.pairing_path))
+        self.assertEqual(code, 1)
+        self.assertIn("yourself", out)
+        ask.assert_not_called()
+        self.assertEqual(usbwatch.load_pairing(self.pairing_path), before)
+
+    def test_there_is_no_flag_that_says_yes_for_you(self) -> None:
+        with self.assertRaises(SystemExit), mock.patch("sys.stderr", new_callable=StringIO):
+            usbwatch.main(["trust", "--yes", "--pairing", str(self.pairing_path)])
+
+    def test_a_keyboard_is_a_terminal_on_stdin(self) -> None:
+        with mock.patch("sys.stdin") as stdin:
+            stdin.isatty.return_value = False
+            self.assertFalse(usbwatch._can_ask())
+            stdin.isatty.return_value = True
+            self.assertTrue(usbwatch._can_ask())
+
+
+class ManifestParityTests(unittest.TestCase):
+    """The installed launcher cannot import babyai.portable, so it has its own copy of the manifest rules: they must agree."""
+
+    def test_both_make_the_same_manifest_for_a_tree_with_everything_in_it(self) -> None:
+        from babyai import portable
+        from tests.test_portable import build_stick_tree
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = build_stick_tree(Path(tmp))
+            self.assertEqual(usbwatch.manifest(root), portable.manifest(root))
+
+
+class MountParsingTests(Disk):
+    """The user's own stick is called "BENNY_S AI": /proc/self/mountinfo writes that space as \\040."""
+
+    def test_a_mount_point_with_a_space_in_it_is_read_back_whole(self) -> None:
+        mount = self.home / "BENNY_S AI"
+        mount.mkdir()
+        info = self.home / "mountinfo"
+        escaped = str(mount).replace(" ", "\\040")
+        info.write_text(
+            "26 1 0:23 / /run rw - tmpfs tmpfs rw\n"
+            f"412 62 8:49 / {escaped} rw,nosuid,nodev,relatime shared:230 - vfat /dev/sdd1 rw,uid=1000,gid=1000,fmask=0022,dmask=0022,showexec,flush\n"
+        )
+        found = usbwatch.mounts(info)
+        self.assertEqual([item.target for item in found], [Path("/run"), mount])
+        stick = found[1]
+        self.assertEqual((stick.source, stick.fstype), ("/dev/sdd1", "vfat"))
+        self.assertIn("nosuid", stick.options)
+        self.assertIn("showexec", stick.options)
+        self.assertEqual(usbwatch.mount_point("/dev/sdd1", info), mount)
+        self.assertEqual(usbwatch.mount_for_path(mount, info).fstype, "vfat")
+
+    def test_a_device_that_is_not_mounted_has_no_mount_point(self) -> None:
+        info = self.home / "mountinfo"
+        info.write_text("26 1 0:23 / /run rw - tmpfs tmpfs rw\n")
+        self.assertIsNone(usbwatch.mount_point("/dev/sdd1", info))
+        self.assertEqual(usbwatch.mounts(self.home / "missing"), [])
+
+
+class LaunchPortableTests(PortableDisk):
+    def setUp(self) -> None:
+        super().setUp()
+        patches = [
+            mock.patch.dict(os.environ, {"DISPLAY": ":0", "XDG_RUNTIME_DIR": str(self.home / "run")}),
+            mock.patch.object(usbwatch, "choose_python", return_value="/usr/bin/python3"),
+            mock.patch.object(usbwatch, "start_local_ollama", return_value=None),
+            mock.patch.object(usbwatch, "spawn", return_value=mock.Mock(pid=4242)),
+        ]
+        self.spawn = patches[3].start()
+        for patch in patches[:3]:
+            patch.start()
+        for patch in patches:
+            self.addCleanup(patch.stop)
+        self.state = self.home / "state" / "babyai"
+
+    def test_he_is_started_from_the_drive_with_the_data_and_caches_on_the_drive(self) -> None:
+        usbwatch.launch_portable(self.pairing, self.state, lambda message: None)
+        command, cwd, _directory, env = self.spawn.call_args.args
+        self.assertEqual(command, ["/usr/bin/python3", "-m", "babyai", "--desktop", "--config", str(self.app / "config.toml")])
+        self.assertEqual(cwd, self.app)
+        self.assertEqual(env["BABYAI_HOME"], str(self.app))
+        self.assertEqual(env["XDG_CACHE_HOME"], str(self.app / "data" / "cache"))
+        self.assertEqual(env["PYTHONPATH"], str(self.app))
+        self.assertEqual(env["BABYAI_PAIRING"], str(usbwatch.pairing_path()))
+
+    def test_he_is_given_the_sessions_current_display_not_the_stale_one_the_watcher_started_with(self) -> None:
+        fresh = self.home / "run" / "xauth_fresh"
+        fresh.parent.mkdir(parents=True, exist_ok=True)
+        fresh.write_text("")
+        with mock.patch.dict(os.environ, {"XAUTHORITY": str(self.home / "run" / "xauth_gone")}):
+            with mock.patch.object(usbwatch, "_manager_environment", return_value={"DISPLAY": ":0", "XAUTHORITY": str(fresh)}):
+                usbwatch.launch_portable(self.pairing, self.state, lambda message: None)
+        env = self.spawn.call_args.args[3]
+        self.assertEqual(env["XAUTHORITY"], str(fresh))
+        self.assertEqual(env["BABYAI_HOME"], str(self.app))  # (and everything portable is still there)
+
+    def test_a_stale_authority_file_nobody_can_replace_is_taken_out_not_passed_on(self) -> None:
+        with mock.patch.dict(os.environ, {"XAUTHORITY": str(self.home / "run" / "xauth_gone")}):
+            usbwatch.launch_portable(self.pairing, self.state, lambda message: None)
+        self.assertIsNone(self.spawn.call_args.args[3]["XAUTHORITY"])
+
+    def test_if_the_desktop_is_not_up_yet_he_waits_for_it_and_then_starts(self) -> None:
+        answers = iter([{}, {}, {"DISPLAY": ":0"}])
+        said: list[str] = []
+        env = {key: value for key, value in os.environ.items() if key not in usbwatch.DISPLAY_KEYS}
+        with mock.patch.dict(os.environ, env, clear=True):
+            with mock.patch.object(usbwatch, "_manager_environment", side_effect=lambda: next(answers)), mock.patch.object(usbwatch.time, "sleep"):
+                usbwatch.launch_portable(self.pairing, self.state, said.append)
+        self.spawn.assert_called_once()
+        self.assertEqual(self.spawn.call_args.args[3]["DISPLAY"], ":0")
+        self.assertEqual(sum("isn't ready yet" in line for line in said), 1)  # (said once, not once a second)
+
+    def test_a_drive_taken_out_while_he_waited_for_the_desktop_is_not_launched_from(self) -> None:
+        with mock.patch.object(usbwatch, "wait_for_display", side_effect=lambda *a, **k: unplug(self.base) or {"DISPLAY": ":0"}):
+            with self.assertRaisesRegex(usbwatch.LaunchError, "taken out"):
+                usbwatch.launch_portable(self.pairing, self.state, lambda message: None)
+        self.spawn.assert_not_called()
+
+    def test_no_desktop_at_all_is_explained_and_nothing_is_started(self) -> None:
+        env = {key: value for key, value in os.environ.items() if key not in usbwatch.DISPLAY_KEYS}
+        with mock.patch.dict(os.environ, env, clear=True):
+            with self.assertRaisesRegex(usbwatch.LaunchError, "no display"):
+                usbwatch.launch_portable(self.pairing, self.state, lambda message: None, cancelled=lambda: True)
+        self.spawn.assert_not_called()
+
+    def test_bytecode_on_the_stick_is_never_read(self) -> None:
+        usbwatch.launch_portable(self.pairing, self.state, lambda message: None)
+        env = self.spawn.call_args.args[3]
+        prefix = Path(env["PYTHONPYCACHEPREFIX"])
+        self.assertNotIn(self.mount, prefix.parents)
+        self.assertEqual(env["PYTHONDONTWRITEBYTECODE"], "1")
+
+    def test_the_pid_is_remembered_for_eject(self) -> None:
+        launched = usbwatch.launch_portable(self.pairing, self.state, lambda message: None)
+        self.assertEqual(launched.pid, 4242)
+        saved = usbwatch._read_child_state()
+        self.assertEqual((saved["pid"], saved["root"]), (4242, str(self.app)))
+
+    def test_a_drive_that_is_in_but_not_mounted_is_explained_not_launched(self) -> None:
+        with mock.patch.object(usbwatch, "wait_for_mount", return_value=None):
+            with self.assertRaisesRegex(usbwatch.LaunchError, "isn't mounted"):
+                usbwatch.launch_portable(self.pairing, self.state, lambda message: None)
+        self.spawn.assert_not_called()
+
+    def test_a_folder_that_is_not_babyai_is_explained_not_launched(self) -> None:
+        (self.app / "babyai" / "__init__.py").unlink()
+        with self.assertRaisesRegex(usbwatch.LaunchError, "doesn't look like"):
+            usbwatch.launch_portable(self.pairing, self.state, lambda message: None)
+        self.spawn.assert_not_called()
+
+    def test_changed_code_is_refused_before_anything_starts(self) -> None:
+        (self.app / "babyai" / "a.py").write_text("A = 'evil'\n")
+        with mock.patch.object(usbwatch, "notify") as notify:
+            with self.assertRaisesRegex(usbwatch.LaunchError, "trust"):
+                usbwatch.launch_portable(self.pairing, self.state, lambda message: None)
+        notify.assert_called_once()
+        self.spawn.assert_not_called()
+
+    def test_a_swapped_bundled_program_is_refused_too(self) -> None:
+        (self.app / "runtime" / "bin").mkdir(parents=True)
+        (self.app / "runtime" / "bin" / "python3").write_text("real")
+        usbwatch.save_pairing({**self.pairing, "trust": usbwatch.manifest(self.app)}, self.pairing_path)
+        pairing = usbwatch.load_pairing(self.pairing_path)
+        usbwatch.launch_portable(pairing, self.state, lambda message: None)  # trusted as it is
+        (self.app / "runtime" / "bin" / "python3").write_text("swapped")
+        with self.assertRaisesRegex(usbwatch.LaunchError, "runtime/"):
+            usbwatch.launch_portable(pairing, self.state, lambda message: None)
+
+
+class EjectTests(PortableDisk):
+    def setUp(self) -> None:
+        super().setUp()
+        self.addCleanup(os.chdir, os.getcwd())  # (eject leaves the drive's folders so it can unmount)
+        self.bin = self.home / "bin"
+        self.bin.mkdir()
+        self.calls = self.home / "udisksctl.calls"
+        tool = self.bin / "udisksctl"
+        tool.write_text(f"#!/bin/sh\necho \"$@\" >> {shlex.quote(str(self.calls))}\nexit ${{UDISKS_EXIT:-0}}\n")
+        tool.chmod(0o755)
+        patch = mock.patch.dict(os.environ, {"PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}"})
+        patch.start()
+        self.addCleanup(patch.stop)
+        patch = mock.patch.object(usbwatch, "stop_watcher", return_value=True)
+        self.stop_watcher = patch.start()
+        self.addCleanup(patch.stop)
+
+    def start_app(self) -> subprocess.Popen:
+        """Something whose command line is what he looks like when the launcher started him from this drive."""
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)", "babyai", "--desktop", "--config", str(self.app / "config.toml")],
+            start_new_session=True,
+        )
+        self.addCleanup(lambda: (process.poll() is None and process.kill(), process.wait()))
+        return process
+
+    def eject(self, *argv: str) -> tuple[int, str]:
+        return self.run_cli("eject", "--pairing", str(self.pairing_path), *argv)
+
+    def test_he_is_closed_then_the_drive_is_unmounted(self) -> None:
+        process = self.start_app()
+        code, out = self.eject("--pid", str(process.pid))
+        self.assertEqual(code, 0, out)
+        self.assertIsNotNone(process.poll(), "he must be closed before the drive is let go")
+        self.assertEqual(self.calls.read_text().split(), ["unmount", "-b", str(self.base / "dev" / "sdb1")])
+
+    def test_the_launcher_keeps_watching_so_the_next_plug_in_starts_him_again(self) -> None:
+        process = self.start_app()
+        self.eject("--pid", str(process.pid))
+        self.stop_watcher.assert_not_called()
+
+    def test_a_process_that_is_not_him_is_left_alone(self) -> None:
+        other = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        self.addCleanup(lambda: (other.poll() is None and other.kill(), other.wait()))
+        _code, out = self.eject("--pid", str(other.pid))
+        self.assertIn("left every process alone", out)
+        self.assertIsNone(other.poll())
+
+    def test_a_copy_of_him_running_from_another_folder_is_left_alone(self) -> None:
+        elsewhere = self.home / "elsewhere"
+        elsewhere.mkdir()
+        other = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)", "babyai", "--desktop", "--config", str(elsewhere / "config.toml")],
+            start_new_session=True,
+        )
+        self.addCleanup(lambda: (other.poll() is None and other.kill(), other.wait()))
+        self.eject("--pid", str(other.pid))
+        self.assertIsNone(other.poll())
+
+    def test_a_drive_that_will_not_let_go_is_reported_and_not_forced(self) -> None:
+        process = self.start_app()
+        ticks = iter(range(0, 10_000, 40))  # a clock that runs fast, so the 20 s wait for the drive ends at once
+        with mock.patch.dict(os.environ, {"UDISKS_EXIT": "1"}), mock.patch.object(usbwatch.time, "sleep"), \
+                mock.patch.object(usbwatch.time, "monotonic", side_effect=lambda: float(next(ticks))):
+            code, _out = self.eject("--pid", str(process.pid))
+        self.assertEqual(code, 1)
+        self.assertNotIn("power-off", self.calls.read_text())
+
+    def test_without_udisksctl_it_says_so(self) -> None:
+        process = self.start_app()
+        with mock.patch.object(usbwatch.shutil, "which", return_value=None):
+            code, out = self.eject("--pid", str(process.pid))
+        self.assertEqual(code, 1)
+        self.assertIn("udisksctl isn't installed", out)
+
+    def test_a_key_only_pairing_has_nothing_to_eject(self) -> None:
+        usbwatch.save_pairing({"mode": "key", "drive": "uuid:ABCD-1234", "config": str(self.config)}, self.pairing_path)
+        code, out = self.eject()
+        self.assertEqual(code, 1)
+        self.assertIn("portable", out)
+
+
+class FatStickGitTests(PortableDisk):
+    """FAT shows every file as executable. git reads that as every file edited, and self-upgrade refuses a dirty folder."""
+
+    def make_stick(self, fstype: str) -> Path:
+        git = shutil.which("git")
+        if not git:
+            self.skipTest("git is not installed")
+        source = self.home / "checkout"
+        (source / "babyai").mkdir(parents=True)
+        (source / "babyai" / "__init__.py").write_text("")
+        (source / "babyai" / "main.py").write_text("print('hi')\n")
+        for args in (("init", "-q"), ("add", "-A"), ("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x")):
+            subprocess.run([git, *args], cwd=source, check=True, capture_output=True)
+        target = self.home / "stick"
+        target.mkdir()
+        self.mountinfo.write_text(self.mountinfo.read_text() + f"40 35 8:60 / {target} rw - {fstype} {self.base / 'dev' / 'sdb1'} rw\n")
+        code, out = self.run_cli(
+            "make-drive", str(target), "--source", str(source), "--uuid", "ABCD-1234", "--no-install", "--no-data", "--yes",
+            "--pairing", str(self.pairing_path),
+        )
+        self.assertEqual(code, 0, out)
+        root = target / "BabyAI"
+        for path in root.rglob("*"):
+            if path.is_file() and ".git" not in path.parts:
+                path.chmod(0o755)  # what a FAT mount (fmask=0022) makes of every file
+        return root
+
+    def changed(self, root: Path, *flags: str) -> list[str]:
+        done = subprocess.run(
+            ["git", "-c", f"safe.directory={root}", *flags, "diff", "--name-only"], cwd=root, capture_output=True, text=True, check=True,
+        )
+        return sorted(name for name in done.stdout.split() if name != "config.toml")  # (the portable settings really are an edit)
+
+    def test_on_fat_git_does_not_see_the_exec_bits_as_edits(self) -> None:
+        root = self.make_stick("vfat")
+        self.assertEqual(self.changed(root), [])
+        self.assertIn("babyai/main.py", self.changed(root, "-c", "core.fileMode=true"), "this test would not notice the problem")
+
+    def test_on_a_linux_filesystem_git_keeps_noticing_mode_changes(self) -> None:
+        root = self.make_stick("ext4")
+        self.assertIn("babyai/main.py", self.changed(root))
+
+    def test_the_trust_manifest_is_taken_after_the_setting_so_it_includes_it(self) -> None:
+        root = self.make_stick("vfat")
+        saved = usbwatch.load_pairing(self.pairing_path)
+        self.assertEqual(usbwatch.trust_changes(saved, root), [])
+        self.assertIn(".git/config", saved["trust"])
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------------------------- the display after login
+
+
+class WaitForWatcherTests(Disk):
+    """``install`` returns only when the watcher it started is up, so the ``status`` after it tells the truth."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.now = 0.0
+        self.directory = self.home / "state" / "babyai"
+        self.directory.mkdir(parents=True)
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+    def test_it_waits_until_the_watcher_has_written_its_pid_and_then_returns_it(self) -> None:
+        answers = iter([None, None, 4242])
+        with mock.patch.object(usbwatch, "running_watcher", side_effect=lambda directory: next(answers)):
+            pid = REAL_WAIT_FOR_WATCHER(self.directory, 5.0, self.sleep, lambda: self.now)
+        self.assertEqual(pid, 4242)
+        self.assertAlmostEqual(self.now, 0.2)
+
+    def test_it_gives_up_after_the_time_and_says_none(self) -> None:
+        with mock.patch.object(usbwatch, "running_watcher", return_value=None):
+            self.assertIsNone(REAL_WAIT_FOR_WATCHER(self.directory, 5.0, self.sleep, lambda: self.now))
+        self.assertGreaterEqual(self.now, 5.0)
+
+    def test_install_says_the_pid_when_the_watcher_is_up_and_how_to_check_when_it_is_not(self) -> None:
+        usbwatch.write_setting(self.config, "usb", "drive", "uuid:ABCD-1234")
+        with mock.patch.object(usbwatch, "start_watcher"), mock.patch.object(usbwatch, "wait_for_watcher", return_value=4242):
+            out = self.run_cli("install", "--config", str(self.config))[1]
+        self.assertIn("running now (pid 4242)", out)
+        with mock.patch.object(usbwatch, "start_watcher"), mock.patch.object(usbwatch, "wait_for_watcher", return_value=None):
+            out = self.run_cli("install", "--config", str(self.config))[1]
+        self.assertIn("can't see it running yet", out)
+        self.assertIn("usbwatch status", out)
+
+
+class ManagerEnvironmentTests(Disk):
+    """What the user's systemd manager says, with a fake ``systemctl`` first on PATH."""
+
+    def fake_systemctl(self, output: str, *, code: int = 0, hang: bool = False) -> None:
+        bin_dir = self.home / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        (self.home / "systemctl.out").write_text(output)
+        tool = bin_dir / "systemctl"
+        tool.write_text(
+            f'#!/bin/sh\necho "$@" >> "{self.home / "systemctl.calls"}"\n'
+            + ("sleep 5\n" if hang else "")
+            + f'cat "{self.home / "systemctl.out"}"\nexit {code}\n'
+        )
+        tool.chmod(0o755)
+        patch = mock.patch.dict(os.environ, {"PATH": f"{bin_dir}{os.pathsep}/usr/bin:/bin"})
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_only_the_three_display_names_are_taken(self) -> None:
+        self.fake_systemctl(
+            "DISPLAY=:0\nWAYLAND_DISPLAY=wayland-0\nXAUTHORITY=/run/user/1000/xauth_x\nSECRET_TOKEN=hunter2\nPATH=/usr/bin\nXAUTHORITY2=/x\n"
+        )
+        self.assertEqual(
+            REAL_MANAGER_ENVIRONMENT(),
+            {"DISPLAY": ":0", "WAYLAND_DISPLAY": "wayland-0", "XAUTHORITY": "/run/user/1000/xauth_x"},
+        )
+        self.assertEqual((self.home / "systemctl.calls").read_text().strip(), "--user show-environment")
+
+    def test_a_value_systemd_had_to_quote_is_not_used(self) -> None:
+        self.fake_systemctl("XAUTHORITY=$'/odd\\npath'\nDISPLAY=:1\n")
+        self.assertEqual(REAL_MANAGER_ENVIRONMENT(), {"DISPLAY": ":1"})
+
+    def test_a_manager_that_fails_is_missing_or_hangs_gives_nothing(self) -> None:
+        self.fake_systemctl("DISPLAY=:0\n", code=1)
+        self.assertEqual(REAL_MANAGER_ENVIRONMENT(), {})
+        self.fake_systemctl("DISPLAY=:0\n", hang=True)
+        self.assertEqual(REAL_MANAGER_ENVIRONMENT(timeout=0.2), {})
+        with mock.patch.dict(os.environ, {"PATH": str(self.home / "empty")}):
+            self.assertEqual(REAL_MANAGER_ENVIRONMENT(), {})
+
+
+class SessionDisplayEnvTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+        self.sockets = self.dir / "x11"
+        self.sockets.mkdir()
+        (self.sockets / "X0").write_text("")
+        self.old = str(self.dir / "xauth_old")  # (never created: Xwayland took it away when it stopped)
+        self.new = self.dir / "xauth_new"
+        self.new.write_text("")
+
+    def resolve(self, live: dict[str, str], inherited: dict[str, str]) -> dict[str, str | None]:
+        return usbwatch.session_display_env({"XDG_RUNTIME_DIR": str(self.dir), **inherited}, lambda: live, self.sockets)
+
+    def test_the_sessions_current_values_win_over_the_ones_the_watcher_started_with(self) -> None:
+        got = self.resolve({"DISPLAY": ":0", "XAUTHORITY": str(self.new)}, {"DISPLAY": ":0", "XAUTHORITY": self.old})
+        self.assertEqual((got["DISPLAY"], got["XAUTHORITY"]), (":0", str(self.new)))
+
+    def test_when_both_still_exist_the_session_is_believed_over_the_watcher(self) -> None:
+        lingering = self.dir / "xauth_lingering"
+        lingering.write_text("")
+        (self.sockets / "X1").write_text("")
+        got = self.resolve({"DISPLAY": ":1", "XAUTHORITY": str(self.new)}, {"DISPLAY": ":0", "XAUTHORITY": str(lingering)})
+        self.assertEqual((got["DISPLAY"], got["XAUTHORITY"]), (":1", str(self.new)))
+
+    def test_a_stale_authority_file_is_dropped_when_nothing_better_exists(self) -> None:
+        got = self.resolve({}, {"DISPLAY": ":0", "XAUTHORITY": self.old})
+        self.assertIsNone(got["XAUTHORITY"])
+        self.assertEqual(got["DISPLAY"], ":0")
+
+    def test_what_was_inherited_is_used_when_the_session_has_nothing_to_say(self) -> None:
+        got = self.resolve({}, {"DISPLAY": ":0", "XAUTHORITY": str(self.new), "WAYLAND_DISPLAY": "wayland-0"})
+        self.assertEqual((got["DISPLAY"], got["XAUTHORITY"], got["WAYLAND_DISPLAY"]), (":0", str(self.new), "wayland-0"))
+
+    def test_a_current_value_that_points_at_nothing_does_not_beat_one_that_works(self) -> None:
+        got = self.resolve({"DISPLAY": ":9", "XAUTHORITY": self.old}, {"DISPLAY": ":0", "XAUTHORITY": str(self.new)})
+        self.assertEqual((got["DISPLAY"], got["XAUTHORITY"]), (":0", str(self.new)))
+
+    def test_a_display_that_cannot_be_checked_is_kept_rather_than_thrown_away(self) -> None:
+        self.assertEqual(self.resolve({}, {"DISPLAY": "localhost:10.0"})["DISPLAY"], "localhost:10.0")
+        self.assertEqual(self.resolve({}, {"DISPLAY": ":7"})["DISPLAY"], ":7")  # (no socket to see, but it is all there is)
+
+    def test_the_wayland_socket_is_looked_for_in_the_runtime_folder(self) -> None:
+        (self.dir / "wayland-1").write_text("")
+        got = self.resolve({"WAYLAND_DISPLAY": "wayland-0"}, {"WAYLAND_DISPLAY": "wayland-1"})
+        self.assertEqual(got["WAYLAND_DISPLAY"], "wayland-1")
+
+    def test_nothing_is_made_up_when_there_is_nothing(self) -> None:
+        self.assertEqual(self.resolve({}, {}), {"DISPLAY": None, "WAYLAND_DISPLAY": None, "XAUTHORITY": None})
+
+    def test_the_authority_file_is_never_read(self) -> None:
+        self.new.write_text("SECRETCOOKIE")
+        with mock.patch("builtins.open", side_effect=AssertionError("opened a file")):
+            got = self.resolve({"XAUTHORITY": str(self.new)}, {})
+        self.assertEqual(got["XAUTHORITY"], str(self.new))
+        self.assertNotIn("SECRETCOOKIE", usbwatch.display_report(got))
+
+
+class WaitForDisplayTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.now = 0.0
+        self.slept: list[float] = []
+        self.said: list[str] = []
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
+
+    def wait(self, answers: list[dict[str, str | None]], **kwargs: object) -> dict[str, str | None]:
+        feed = iter(answers)
+        last = answers[-1]
+        return usbwatch.wait_for_display(
+            self.said.append, resolve=lambda: next(feed, last), sleep=self.sleep, clock=lambda: self.now, **kwargs  # type: ignore[arg-type]
+        )
+
+    def test_a_desktop_that_is_there_is_not_waited_for(self) -> None:
+        got = self.wait([{"DISPLAY": ":0"}])
+        self.assertEqual(got["DISPLAY"], ":0")
+        self.assertEqual(self.slept, [])
+
+    def test_it_waits_until_the_desktop_appears_and_says_so_once(self) -> None:
+        got = self.wait([{}, {}, {}, {"DISPLAY": ":0"}])
+        self.assertEqual(got["DISPLAY"], ":0")
+        self.assertEqual(len(self.slept), 3)
+        self.assertEqual(sum("isn't ready yet" in line for line in self.said), 1)
+
+    def test_it_gives_up_after_the_timeout_and_explains(self) -> None:
+        with self.assertRaisesRegex(usbwatch.LaunchError, "no display"):
+            self.wait([{}], timeout=5.0)
+        self.assertEqual(sum(self.slept), 5.0)
+
+    def test_a_wayland_display_without_an_x_display_starts_him_anyway_and_says_so(self) -> None:
+        got = self.wait([{"WAYLAND_DISPLAY": "wayland-0"}], timeout=2.0)
+        self.assertEqual(got["WAYLAND_DISPLAY"], "wayland-0")
+        self.assertTrue(any("no X display" in line for line in self.said))
+
+    def test_stopping_the_watcher_ends_the_wait_at_once(self) -> None:
+        with self.assertRaisesRegex(usbwatch.LaunchError, "no display"):
+            self.wait([{}], cancelled=lambda: True)
+        self.assertEqual(self.slept, [])
+
+
+REAL_MANAGER_ENVIRONMENT = usbwatch._manager_environment
+REAL_WAIT_FOR_WATCHER = usbwatch.wait_for_watcher

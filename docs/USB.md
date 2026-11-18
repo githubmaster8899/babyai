@@ -13,7 +13,7 @@ switch and no new dependency, and the old key-only setup is still the default.
 | What is on the stick | nothing BabyAI reads | app, Capri assets, config, `data/` |
 | How it is recognised | `uuid:...`, `label:...` or hardware `id` | filesystem `uuid:...` only |
 | Data location | your normal `~/.local/share/babyai` | `<mount>/BabyAI/data/` |
-| Changes on the stick checked? | no | SHA-256 manifest of every `.py` |
+| Changes on the stick checked? | no | SHA-256 manifest of every `.py`, the git settings and any bundled programs |
 
 Key mode is deliberately unchanged: plugging the stick in is just a trigger.
 Portable mode runs the copy on the stick, so the same stick can be carried to
@@ -90,6 +90,9 @@ python3 -m babyai.usbwatch make-drive "/run/media/you/BENNY"
   `[usb] mode = "portable"`;
 * copies memory using SQLite's online backup, plus habits, personality,
   reminders and self-upgrade notes from `~/.local/share/babyai`;
+* on FAT/exFAT/NTFS sticks, sets `core.fileMode = false` in the copied `.git/config`
+  (those filesystems have no execute bit, so git would otherwise report every
+  file as modified and the self-upgrade tests would refuse to run);
 * records the SHA-256 manifest and installs/starts the host watcher.
 
 Useful options: `--data-from PATH`, `--no-data`, `--overwrite-data`,
@@ -101,29 +104,69 @@ may contain spaces.
 
 The launcher resolves the stick by filesystem UUID, waits about 20 seconds for
 the desktop to automount it, and only then falls back to `udisksctl mount`. It
-checks the display, Python version, Tkinter, and whether the drive is mounted
-`noexec` (bundled runtime/Ollama programs cannot run from a `noexec` mount).
+checks the Python version, Tkinter, the display (see below), and whether the
+drive is mounted `noexec` (bundled runtime/Ollama programs cannot run from a
+`noexec` mount). Python compiled files are never read from or written to the
+stick: `PYTHONPYCACHEPREFIX` points at an empty folder under `XDG_RUNTIME_DIR`.
+
+## Starting at login, and the display
+
+`pair` and `make-drive` install `~/.config/autostart/babyai-usb.desktop`, so the
+watcher starts with your KDE session. The watcher can start before the desktop
+has finished setting up its display, and it can keep running across an
+Xwayland restart. Each restart gets a new random X authority file, so the
+`DISPLAY`/`XAUTHORITY` that the watcher inherited at login can be out of date
+("Authorization required, but no authorization protocol specified", "couldn't
+connect to display"). So, at every launch the watcher:
+
+1. asks your session's systemd user manager for the current `DISPLAY`,
+   `WAYLAND_DISPLAY` and `XAUTHORITY` (`systemctl --user show-environment`, the
+   same values KDE hands to every program it starts), and prefers those when
+   they point at something that exists;
+2. falls back to the values it inherited, and removes an `XAUTHORITY` that names
+   a file that is gone instead of passing it on;
+3. waits up to 45 seconds if there is no `DISPLAY` yet, saying so once in the log,
+   and checks that the drive is still in afterwards.
+
+No file name is built in, and the authority file is only checked to exist: it is
+never read, and neither its name nor its contents go to the log or to `status`.
+
+To see what he would be given right now:
+
+```sh
+python3 -m babyai.usbwatch status
+```
+
+A launch is tried once per plug-in (waiting for the desktop counts as part of
+that try). If it failed, the reason is in the log; unplug and replug the stick
+to try again.
 
 ## Trusting changes on a portable stick
 
-A portable pairing includes a SHA-256 manifest of every `.py` file under the app
-folder (excluding `.git`, `data`, `runtime`, `ollama` and caches). Before
-launch, the launcher recomputes it. If anything is new, changed or missing, it:
+A portable pairing includes a SHA-256 manifest of everything on the stick that
+runs as you: every `.py` file under the app folder, git's own `.git/config`,
+`.git/info/attributes` and non-sample hooks, and, if they are there, the bundled
+`runtime/` and `ollama/bin` programs (one combined digest each). `data/` and
+caches are not covered, since they are his to change. Before launch, the launcher
+recomputes it. If anything is new, changed or missing, it:
 
 * logs the mismatch and sends a desktop notification;
 * refuses to launch;
 * tells you to run `trust`.
 
 The `trust` command lists the changed files and requires an interactive
-confirmation before updating the manifest. There is no non-interactive bypass:
+confirmation before updating the manifest. It has to be run in a real terminal:
+with no keyboard attached (a pipe, a script, a tool call) it refuses. There is no
+non-interactive bypass:
 
 ```sh
 # from the app folder on the stick, or with the package on PYTHONPATH
 python3 -m babyai.usbwatch trust
 ```
 
-`trust` is a command-line action only. The model has no tool that can run it,
-and the launcher files and trust tests are on the protected list. A failed
+`trust` is a command-line action only. The model has no tool that can run it
+(the shell tool refuses any command naming `usbwatch` or `babyai-usb`), and the
+launcher files and trust tests are on the protected list. A failed
 manifest check is never retried in a loop while the stick stays plugged in;
 unplug and replug after trusting.
 
@@ -131,6 +174,14 @@ Changes the user approves through the existing self-upgrade flow
 (`upgrade_code apply`, `upgrade_version update`, rollback) refresh the manifest
 at the end of that operation, because the user already approved those files.
 A manual edit on the stick still needs `trust`.
+
+A stick paired before the manifest grew to cover git's settings and the bundled
+programs will, the first time after the launcher is updated, list `.git/config`
+(and any hooks or bundled programs) as new and refuse to launch. That is expected:
+look at the list, then run `python3 -m babyai.usbwatch trust` once in a terminal
+and answer `y`. The running watcher reads the manifest again at its next launch, so
+there is nothing to restart: unplug and replug the stick (or restart the watcher
+with `install`, which launches at once if the stick is in).
 
 ## Removing the stick safely
 
@@ -150,6 +201,46 @@ while the app is writing. The memory database uses `journal_mode=DELETE` (no
 writes for the JSON state files. Disk I/O errors from a removal are swallowed,
 remembered by the memory tool, and the watcher closes the app after the grace
 period.
+
+## Troubleshooting
+
+| What you see | Look at / try |
+|---|---|
+| Nothing opens when the stick goes in | `python3 -m babyai.usbwatch status`: is the watcher running, the drive plugged in, a display shown? |
+| "Could not start him: ..." | `tail ~/.local/state/babyai/usbwatch.log` says why. Unplug and replug to try again. |
+| He starts and the window never appears | `tail ~/.local/state/babyai/babyai-from-usb.log` (his own output; display errors show up here). |
+| "files on the drive changed" notification | You, or the self-upgrade flow outside its normal path, changed code on the stick. Look at the listed files, then run `python3 -m babyai.usbwatch trust` yourself. |
+| "not mounted yet" | Open the drive once in the file manager; replug. `udisksctl` must exist for the fallback mount. |
+| Eject says the drive is busy | Close anything else showing the stick (a file manager window, a terminal in it) and use **Eject USB** again. |
+| The watcher is not running after login | `python3 -m babyai.usbwatch status`. Run `install` again from your desktop session (below). `journalctl --user -b -g usbwatch` and `~/.local/state/babyai/usbwatch-run.log` have anything it printed. |
+
+The logs are in `~/.local/state/babyai/` (or under `XDG_STATE_HOME`): `usbwatch.log`
+(what the watcher decided), `usbwatch-run.log` (what it printed), and
+`babyai-from-usb.log` (his own output). The first and last are started afresh
+when they pass 1 MB. The login item's own output goes to the session journal,
+not to `usbwatch-run.log`, which only has what a watcher started by `install` printed.
+
+After updating the launcher code, install it again so the login item and the
+running watcher use the new copy. For portable mode that is:
+
+```sh
+python3 -m babyai.usbwatch install --config "$HOME/babyai/config.toml"
+```
+
+It stops the old watcher, starts the new one, and waits until that one is running, so a
+`status` straight after it is accurate. A BabyAI that is already
+running is left alone, and nothing on the stick is touched.
+
+## Removing the launcher
+
+```sh
+python3 -m babyai.usbwatch uninstall
+```
+
+removes the login item and stops the watcher. It never touches the stick, its
+data, or the pairing record. To forget the pairing too, delete
+`~/.config/babyai-usb/` and `~/.local/share/babyai-usb/` yourself; the stick and
+everything on it stay as they are.
 
 ## Data layout on a portable stick
 
@@ -174,22 +265,68 @@ period.
 stick; the launcher's own log (`~/.local/state/babyai/usbwatch.log`) and the
 pairing record stay on the host.
 
-## What still needs real-drive testing
+## Real-drive check, 2026-11-14
 
-The test suite covers the fake `/dev/disk`, fake mountinfo, trust changes,
-copying, config rewriting, SQLite settings and atomic writes. These need a real
-stick and a desktop session:
+Checked on the `BENNY_S AI` vfat stick (114.4 GB, mounted at
+`/run/media/ItsBenny/BENNY_S AI`) from commit `dcc5d83`:
 
-* a fresh FAT32 stick through `make-drive` and `trust`;
-* plug, unplug, and replug with an app already running;
+* `make-drive --force --no-install --uuid 2154-5D47` replaced the app files in
+  an existing `BabyAI/` folder; the existing `data/` files kept their names,
+  sizes and mtimes.
+* The generated config contains only `[usb]` (no stale `[portable]` table).
+* A 92-file SHA-256 manifest matched every `.py` file on the stick.
+* Appending one line to a real `.py` file on the stick made `trust` list it
+  and refuse with exit 1; answering `yes` on a copy of the pairing approved it,
+  and restoring the file returned the real pairing to zero changes.
+* `launch_portable()` refused the edited file before starting a process, with
+  the "files on the drive changed … run trust" message.
+* The on-drive `data/memory.db` reports `journal_mode=DELETE`,
+  `synchronous=FULL`, `integrity_check=ok`, and has no `-wal`/`-shm` sidecars.
+* A text and a bytes atomic write on the stick left no `.tmp` file and were
+  removed afterwards.
+* `~/.local/share/babyai` and `~/.cache/babyai` were byte-for-byte unchanged
+  (listings and SHA-256) after `make-drive` and the checks.
+* `capri/LICENSE.md`, `NOTICE` and `LICENSE` match the host copies; no
+  `__pycache__` or `.pyc` files were copied to the stick.
+* With the stick unplugged, `status` reports "Drive plugged in now: no" and
+  the watcher is not running.
+
+The shell used for this check hides `/dev/disk` and `/dev/sdb1`, so the real
+`trust` command was exercised through the same functions with a temporary
+fake `/dev/disk` symlink and mountinfo entry. The files it checked were the
+real files on the stick.
+
+### Not tested on this run
+
+These still need a real desktop session and a real `/dev/disk`:
+
+* a **fresh, empty** stick (this run used an existing `BabyAI/` with `--force`);
+* starting the Tk app from the stick (Tkinter is not installed here);
 * remembering a fact and setting a reminder while the app is up;
-* pulling the stick mid-use and checking the app exits and the database is
-  readable on the next mount;
-* KDE's Safely Remove reporting the drive busy, then the Eject USB menu;
+* unplug/replug with the app running, pulling the stick mid-use, and a
+  post-removal database read;
+* KDE's Safely Remove reporting the drive busy, the Eject USB menu, and
+  `udisksctl` unmount;
 * logout/login with the stick in, and a session with no stick;
-* editing a `.py` on the stick and confirming the launch refusal and `trust`;
-* confirming `~/.local/share/babyai` and `~/.cache/babyai` are unchanged while
-  the portable copy runs.
+* installing/starting the real login item and watcher (run was `--no-install`);
+* optional `<root>/runtime/bin/python3` and `<root>/ollama/bin/ollama`;
+* Python 3.11 (only 3.14.9 was available here), ruff, `xvfb-run`, and
+  Tk-dependent tests;
+* macOS and Windows.
+
+### Checked by hand on the same stick
+
+Separately from the run above, on Bazzite with KDE Plasma on Wayland: the drive
+is detected; removal and reinsertion are detected; it is mounted automatically;
+BabyAI starts from the stick and the Capri window opens; the stick's `data/` and
+config folders are there; the login item installs; and the watcher keeps running
+after its terminal is closed. These were run by the maintainer, not by the test suite.
+
+### What the test suite covers
+
+The fake `/dev/disk`, fake mountinfo, trust changes, copying, config rewriting,
+SQLite settings, atomic writes, the display lookup, and the launch and eject
+commands (with a fake `udisksctl` and `systemctl`).
 
 FAT32 has no real Unix execute bits, fakes ownership, is case-insensitive and
 has a 4 GB per-file limit. The app is marked `PYTHONDONTWRITEBYTECODE=1` so it

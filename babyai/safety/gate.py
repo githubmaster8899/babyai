@@ -87,6 +87,8 @@ class SafetyGate:
                 "curl .* | sh",
                 "wget .* | sh",
                 "chmod -R 777 /",
+                "usbwatch",  # the USB launcher decides what runs from the stick (trust, eject, make-drive): only the user runs it
+                "babyai-usb",  # ...and its pairing record, which holds the checksums
             ]:
                 if forbidden in command:
                     return True

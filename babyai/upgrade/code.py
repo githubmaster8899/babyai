@@ -266,7 +266,7 @@ class CodeUpgrades:
             raise UpgradeError("My own folder has moved on since this change was started, so it no longer applies cleanly. Discard it and start again.")
         git(repo, "merge", "--ff-only", "-q", proposal["branch"])
         try:  # the user just approved these files; let the portable trust manifest follow them
-            portable.refresh_trust(self._changed_between(repo, head, tip))
+            portable.refresh_trust(self._changed_between(repo, head, tip), repo)
         except OSError:
             pass
         data = self.journal.load()

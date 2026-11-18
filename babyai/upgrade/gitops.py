@@ -94,7 +94,9 @@ def test_command() -> list[str]:
 def run_tests(path: Path, command: Sequence[str] | None = None, timeout: float = TEST_TIMEOUT_S) -> tuple[bool, str]:
     """Run the test suite in ``path``. (passed, a short summary for the model)."""
     cmd = list(command) if command else test_command()
-    env = {"PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": str(path)}
+    # The tests must never see the portable setting: they would be pointed at the real memory and notes on the stick, and
+    # `refresh_trust` would touch the real pairing record. (Empty means "not set": the loader ignores it.)
+    env = {"PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": str(path), "BABYAI_HOME": "", "BABYAI_PAIRING": ""}
     if not command and not shutil.which("xvfb-run"):
         env.update(DISPLAY="", WAYLAND_DISPLAY="")  # no display at all: the tests that open windows skip themselves
     code, output = run(cmd, path, timeout, env)

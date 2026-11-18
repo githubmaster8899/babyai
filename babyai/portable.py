@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import posixpath
 import re
 import tomllib
 from pathlib import Path
@@ -26,7 +27,10 @@ ENV_HOME = "BABYAI_HOME"
 ENV_PAIRING = "BABYAI_PAIRING"
 PAIRING_DIR = "babyai-usb"
 PAIRING_NAME = "pairing.toml"
-SKIP_PARTS = frozenset({"data", "runtime", "ollama", ".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"})
+SKIP_DIRS = frozenset({".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"})  # (anywhere in the tree)
+TOP_SKIPPED = frozenset({"data", "runtime", "ollama"})  # (only at the top: his data, and the bundles covered by TREES)
+TREES = ("runtime", "ollama/bin")  # bundled programs: if they are on the stick they run as him, so they are in the manifest
+GIT_FILES = (".git/config", ".git/info/attributes")  # what git runs on its own: config (fsmonitor, hooks path...) and hooks
 TRUST_FILE_SUFFIX = ".py"
 
 
@@ -45,10 +49,13 @@ def is_app_root(path: str | Path) -> bool:
 
 def root_for(config: dict[str, Any], config_path: str | Path) -> Path | None:
     """The portable root, if this run is portable, otherwise None."""
+    path = _resolve(config_path)
     from_env = os.environ.get(ENV_HOME)
     if from_env:
-        return _resolve(from_env)
-    path = _resolve(config_path)
+        # BABYAI_HOME belongs to the config.toml that sits in that folder. Any other config (the tests he runs for a
+        # self-upgrade, a one-off `--config`) keeps its own paths: it must never be pointed at the real data on the stick.
+        root = _resolve(from_env)
+        return root if path.parent == root else None
     mode = str(config.get("usb", {}).get("mode", "")).lower()
     if mode == "portable" and is_app_root(path.parent):
         return path.parent
@@ -132,21 +139,46 @@ def toml_dump(data: dict[str, Any]) -> str:
 
 
 def manifest(root: str | Path) -> dict[str, str]:
-    """SHA-256 for every Python file that can run from this app folder."""
+    """SHA-256 for everything on the stick that can run as him: every Python file, the git files that git would run
+    (config and hooks), and, if they are there, the bundled Python and Ollama programs (one digest each for the tree)."""
     root = _resolve(root)
     found: dict[str, str] = {}
-    for path in sorted(root.rglob("*" + TRUST_FILE_SUFFIX)):
-        try:
-            relative = path.relative_to(root).as_posix()
-        except ValueError:
-            continue
-        if any(part in SKIP_PARTS for part in relative.split("/")):
-            continue
-        try:
-            found[relative] = sha256(path)
-        except OSError:
-            continue
+    for folder, names, files in os.walk(root):
+        here = Path(folder)
+        top = here == root
+        names[:] = sorted(name for name in names if name not in SKIP_DIRS and not (top and name in TOP_SKIPPED))
+        for name in sorted(files):
+            if name.endswith(TRUST_FILE_SUFFIX):
+                _record(found, root, here / name)
+    for name in GIT_FILES:
+        _record(found, root, root / name)
+    hooks = root / ".git" / "hooks"
+    if hooks.is_dir():
+        for path in sorted(hooks.iterdir()):
+            if path.is_file() and not path.name.endswith(".sample"):
+                _record(found, root, path)
+    for tree in TREES:
+        if (root / tree).is_dir():
+            found[tree + "/"] = tree_digest(root / tree)
     return found
+
+
+def _record(found: dict[str, str], root: Path, path: Path) -> None:
+    try:
+        found[path.relative_to(root).as_posix()] = sha256(path)
+    except (OSError, ValueError):
+        pass
+
+
+def tree_digest(folder: Path) -> str:
+    """One digest for every file under ``folder`` (names and contents)."""
+    digest = hashlib.sha256()
+    for path in sorted(item for item in Path(folder).rglob("*") if item.is_file()):
+        try:
+            digest.update(path.relative_to(folder).as_posix().encode() + b"\0" + sha256(path).encode() + b"\n")
+        except OSError:
+            digest.update(b"unreadable\n")
+    return digest.hexdigest()
 
 
 def sha256(path: str | Path) -> str:
@@ -164,16 +196,19 @@ def trust_changes(pairing: dict[str, Any], root: str | Path) -> list[str]:
     return sorted(name for name in set(expected) | set(current) if expected.get(name) != current.get(name))
 
 
-def refresh_trust(changed: Iterable[str]) -> bool:
+def refresh_trust(changed: Iterable[str], repo: str | Path | None = None) -> bool:
     """Update the host manifest for files the user just approved and applied.
 
-    ``CodeUpgrades.apply`` and ``VersionUpdates.update`` call this only after
-    the user confirmed the change.  The model has no tool that reaches it.
+    ``CodeUpgrades.apply`` and ``VersionUpdates.update`` call this only after the user confirmed the change, and say which
+    repository changed: if it is not the portable folder itself (a test run, a scratch copy) nothing is touched. The
+    model has no tool that reaches it.
     """
     from_env = os.environ.get(ENV_HOME)
     if not from_env:
         return False
     root = _resolve(from_env)
+    if repo is not None and _resolve(repo) != root:
+        return False
     path = pairing_path()
     data = load_pairing(path)
     if str(data.get("mode", "")).lower() != "portable":
@@ -181,8 +216,8 @@ def refresh_trust(changed: Iterable[str]) -> bool:
     trust = dict(data.get("trust") or {})
     changed_any = False
     for name in changed:
-        relative = str(name).replace("\\", "/").lstrip("./")
-        if not relative or relative.startswith("../") or not relative.endswith(TRUST_FILE_SUFFIX):
+        relative = posixpath.normpath(str(name).replace("\\", "/").strip())
+        if relative in ("", ".") or relative.startswith("/") or relative.split("/")[0] == ".." or not relative.endswith(TRUST_FILE_SUFFIX):
             continue
         target = root / relative
         if target.is_file():

@@ -47,9 +47,9 @@ python3 -m babyai.usbwatch make-drive /run/media/you/BENNY
 `make-drive` shows `findmnt`, asks before writing, refuses a non-empty
 `BabyAI/` unless `--force`, copies the data under `~/.local/share/babyai`, and
 records the drive's filesystem UUID rather than its mount path. A portable
-drive is paired with a SHA-256 manifest of every `.py` in its app folder. If a
-file changes, the launcher refuses to start and lists the files; only the
-person at the machine can accept them:
+drive is paired with a SHA-256 manifest of every `.py` in its app folder (and its
+git settings and any bundled programs). If a file changes, the launcher refuses to start and lists the files; only the
+person at the machine can accept them, in a real terminal:
 
 ```sh
 python3 -m babyai.usbwatch trust
