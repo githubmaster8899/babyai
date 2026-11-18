@@ -227,7 +227,8 @@ running watcher use the new copy. For portable mode that is:
 python3 -m babyai.usbwatch install --config "$HOME/babyai/config.toml"
 ```
 
-It stops the old watcher and starts the new one. A BabyAI that is already
+It stops the old watcher, starts the new one, and waits until that one is running, so a
+`status` straight after it is accurate. A BabyAI that is already
 running is left alone, and nothing on the stick is touched.
 
 ## Removing the launcher

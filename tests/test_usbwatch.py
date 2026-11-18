@@ -76,6 +76,7 @@ class Disk(unittest.TestCase):
             mock.patch.object(usbwatch, "SYS_BLOCK", self.base / "sys"),
             mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(self.home / "state"), "XDG_CONFIG_HOME": str(self.home / "cfg"), "XDG_DATA_HOME": str(self.home / "data")}),
             mock.patch.object(usbwatch, "_manager_environment", return_value={}),  # (the real systemd user manager is never asked)
+            mock.patch.object(usbwatch, "wait_for_watcher", return_value=None),  # (install does not wait for a watcher that the test never starts)
         ]
         for patch in patches:
             patch.start()
@@ -1489,6 +1490,41 @@ if __name__ == "__main__":
 # ---------------------------------------------------------------------------------------------- the display after login
 
 
+class WaitForWatcherTests(Disk):
+    """``install`` returns only when the watcher it started is up, so the ``status`` after it tells the truth."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.now = 0.0
+        self.directory = self.home / "state" / "babyai"
+        self.directory.mkdir(parents=True)
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+    def test_it_waits_until_the_watcher_has_written_its_pid_and_then_returns_it(self) -> None:
+        answers = iter([None, None, 4242])
+        with mock.patch.object(usbwatch, "running_watcher", side_effect=lambda directory: next(answers)):
+            pid = REAL_WAIT_FOR_WATCHER(self.directory, 5.0, self.sleep, lambda: self.now)
+        self.assertEqual(pid, 4242)
+        self.assertAlmostEqual(self.now, 0.2)
+
+    def test_it_gives_up_after_the_time_and_says_none(self) -> None:
+        with mock.patch.object(usbwatch, "running_watcher", return_value=None):
+            self.assertIsNone(REAL_WAIT_FOR_WATCHER(self.directory, 5.0, self.sleep, lambda: self.now))
+        self.assertGreaterEqual(self.now, 5.0)
+
+    def test_install_says_the_pid_when_the_watcher_is_up_and_how_to_check_when_it_is_not(self) -> None:
+        usbwatch.write_setting(self.config, "usb", "drive", "uuid:ABCD-1234")
+        with mock.patch.object(usbwatch, "start_watcher"), mock.patch.object(usbwatch, "wait_for_watcher", return_value=4242):
+            out = self.run_cli("install", "--config", str(self.config))[1]
+        self.assertIn("running now (pid 4242)", out)
+        with mock.patch.object(usbwatch, "start_watcher"), mock.patch.object(usbwatch, "wait_for_watcher", return_value=None):
+            out = self.run_cli("install", "--config", str(self.config))[1]
+        self.assertIn("can't see it running yet", out)
+        self.assertIn("usbwatch status", out)
+
+
 class ManagerEnvironmentTests(Disk):
     """What the user's systemd manager says, with a fake ``systemctl`` first on PATH."""
 
@@ -1634,3 +1670,4 @@ class WaitForDisplayTests(unittest.TestCase):
 
 
 REAL_MANAGER_ENVIRONMENT = usbwatch._manager_environment
+REAL_WAIT_FOR_WATCHER = usbwatch.wait_for_watcher

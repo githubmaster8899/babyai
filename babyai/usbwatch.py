@@ -485,6 +485,18 @@ def running_watcher(directory: Path) -> int | None:
     return pid if looks_like else None
 
 
+def wait_for_watcher(
+    directory: Path, seconds: float = 5.0, sleep: Callable[[float], None] = lambda s: time.sleep(s), clock: Callable[[], float] = lambda: time.monotonic(),
+) -> int | None:
+    """The pid of the watcher once it is up, or None if it still isn't after ``seconds``: a new process takes a moment to start."""
+    deadline = clock() + seconds
+    while True:
+        pid = running_watcher(directory)
+        if pid is not None or clock() >= deadline:
+            return pid
+        sleep(0.1)
+
+
 def watch(watcher: Watcher, done: threading.Event, poll: float = POLL_SECONDS, log: Callable[[str], None] = lambda message: None) -> None:
     """Step until ``done`` is set. A step that goes wrong is reported (once, until it is a different problem) and the watching goes on."""
     last = ""
@@ -1184,7 +1196,12 @@ def cmd_install(args: argparse.Namespace) -> int:
         start_watcher(None if portable else config)
     else:
         start_watcher(None if portable else config, custom)
-    print(f"Installed: {path}\nIt starts when you log in, and I've started it now.")
+    pid = wait_for_watcher(state_dir())  # (so that a `status` straight after this does not look at a watcher that is not up yet)
+    print(f"Installed: {path}")
+    if pid is not None:
+        print(f"It starts when you log in, and it is running now (pid {pid}).")
+    else:
+        print("It starts when you log in. I started it just now but can't see it running yet: look again in a moment with  python3 -m babyai.usbwatch status")
     return 0
 
 
