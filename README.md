@@ -22,6 +22,24 @@ the test suite runs without a display or network:
 python3 -m unittest discover -s tests -t .
 ```
 
+## Planning with workers
+
+Ordinary conversation behaves exactly as before. When you want BabyAI to break a
+larger goal into a task graph and hand it to specialised workers, start the
+message with `plan:`:
+
+```text
+plan: read the project notes, then draft a short summary and check it against the notes
+```
+
+The coordinator plans, validates dependencies, assigns research/coding/memory/
+verification workers, waits for results, verifies them, and returns one
+summarised reply. Every worker tool call still goes through the existing safety
+gate and asks you the same way; no new tools or permissions are added.
+Auto-planning is off by default (`[orchestrator] auto = false`). See
+[docs/ORCHESTRATION.md](docs/ORCHESTRATION.md) for configuration, limits and
+the safety boundary.
+
 ## USB drive
 
 There are two ways to use a USB stick. Both are optional and Linux-only; the

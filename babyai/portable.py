@@ -66,6 +66,7 @@ def apply_paths(config: dict[str, Any], root: str | Path) -> dict[str, Any]:
     """Point every default data path at ``<root>/data``."""
     data = _resolve(root) / "data"
     config.setdefault("memory", {})["db_path"] = str(data / "memory.db")
+    config.setdefault("orchestrator", {})["dir"] = str(data / "orchestrator")
     config.setdefault("upgrade", {})["dir"] = str(data / "self")
     config.setdefault("habits", {})["dir"] = str(data / "habits")
     config.setdefault("personality", {})["dir"] = str(data / "personality")
@@ -79,7 +80,7 @@ def prepare_environment(root: str | Path) -> Path:
     """Create the data folders and point the caches there.  Never touches HOME."""
     root = _resolve(root)
     data = root / "data"
-    for name in ("", "cache", "habits", "personality", "reminders", "self"):
+    for name in ("", "cache", "habits", "orchestrator", "personality", "reminders", "self"):
         (data / name).mkdir(parents=True, exist_ok=True)
     os.environ[ENV_HOME] = str(root)
     os.environ["XDG_CACHE_HOME"] = str(data / "cache")

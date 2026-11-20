@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from babyai.agent.core import BabyAI
+from babyai.orchestrator import Coordinator
 
 
 def _portable_config(args) -> str:
@@ -55,7 +56,7 @@ def main(argv=None):
 
     config_path = _portable_config(args)
     voice_enabled = bool(args.voice) and not bool(args.no_voice)
-    assistant = BabyAI(config_path=config_path, voice_enabled=voice_enabled)
+    assistant = Coordinator(BabyAI(config_path=config_path, voice_enabled=voice_enabled))
 
     if args.portable or os.environ.get("BABYAI_HOME"):
         def _stop(*_args):  # the USB launcher asks politely; let the cleanup below run
@@ -98,7 +99,7 @@ def main(argv=None):
         assistant.run_cli()
         return 0
     finally:
-        assistant.memory.close()
+        assistant.close()
 
 
 if __name__ == "__main__":

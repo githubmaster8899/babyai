@@ -47,6 +47,22 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "memory": {
         "db_path": "~/.local/share/babyai/memory.db",
     },
+    # Optional multi-agent planning. Normal chat is unchanged; `plan: <goal>` asks for a plan.
+    # auto = false keeps planning explicit; set it true for a conservative heuristic on complex requests.
+    "orchestrator": {
+        "enabled": True,
+        "auto": False,
+        "max_tasks": 8,
+        "max_workers": 1,  # independent tasks may run together; 1 keeps confirmations simple
+        "max_tool_calls": 4,
+        "max_rounds": 3,
+        "max_retries": 1,
+        "verify_with_llm": False,  # deterministic checks always run; this adds a second model opinion
+        "planner_model": "",  # empty means the ordinary [llm] model
+        "worker_model": "",
+        "verifier_model": "",
+        # "dir" is an orchestrator folder next to the memory database unless you set it here
+    },
     # Start him when a certain USB drive is plugged in and close him when it is taken out (Linux; `python3 -m babyai.usbwatch pair`
     # picks the drive and sets "drive" for you). mode = "key" keeps only the drive as a key; mode = "portable" runs the copy
     # of BabyAI that lives on the drive.

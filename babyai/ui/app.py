@@ -261,6 +261,7 @@ class BabyAIDesktopWindow:
         self._sounds = SoundPlayer.from_config(ui)  # little sounds: off unless [ui] sounds = true
         self._hidden = False  # sent away with `python3 -m babyai --toggle` (see summon.py)
         self._summons: queue.Queue[str] = queue.Queue()
+        self._progress: queue.Queue[str] = queue.Queue()  # orchestrator status lines from worker threads
         self._summon_server: SummonServer | None = None
         self._history = InputHistory()  # what was typed to her, for the Up and Down keys
         self._typing_via_box = needs_typing_box(ui.get("typing", "auto"), self._windowing, os.environ)
@@ -273,6 +274,8 @@ class BabyAIDesktopWindow:
         self._build_controls()
         self._bind_events()
         self.assistant.confirm = self._confirm_from_worker  # the safety gate asks through the bubble
+        if hasattr(self.assistant, "progress"):  # the coordinator sends short planning status lines
+            self.assistant.progress = self._progress.put
         self._set_reply(f"Hi, I'm {self._name}. Pencil to type, wave to talk.")
         self._poll_results()
         self._tick()
@@ -973,6 +976,11 @@ class BabyAIDesktopWindow:
     def _submit(self, text: str) -> None:
         if self._busy:
             return
+        while True:  # status lines from the last request must not bleed into this one
+            try:
+                self._progress.get_nowait()
+            except queue.Empty:
+                break
         self._busy = True
         self._echo = text
         self._history.add(text)
@@ -995,6 +1003,14 @@ class BabyAIDesktopWindow:
                 self._busy = False
                 self._wake(chime=False)
                 self._sounds.play("reply")
+        except queue.Empty:
+            pass
+        try:
+            while True:
+                line = self._progress.get_nowait()
+                if self._busy:
+                    self._think_text = line
+                    self._render_bubble()
         except queue.Empty:
             pass
         if self._confirm is None:

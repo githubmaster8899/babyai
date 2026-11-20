@@ -47,7 +47,10 @@ PROTECTED = (
     "babyai/agent/core.py",  # where the gate is enforced
     "babyai/usbwatch.py",  # the USB launcher and its trust check must not be editable from inside
     "babyai/portable.py",  # the path/trust rules the launcher relies on
+    "babyai/orchestrator/",  # the planner, workers and verifier must not be editable from inside
     "tests/test_safety.py",
+    "tests/test_orchestrator.py",  # pins the orchestration safety rules
+
     "tests/test_guardrails.py",  # pins how the upgrade code below must behave
     "tests/test_usbwatch.py",
     "tests/test_portable.py",

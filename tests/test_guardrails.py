@@ -136,11 +136,14 @@ class AgentBase(unittest.TestCase):
 class ProtectedPathTests(unittest.TestCase):
     # What he can never change through his tools, whatever else changes: the rules and the gate that make him ask,
     # the place the gate is enforced, the tests that pin all this, the licence notices, git's own folder.
-    LOCKED = ("babyai/safety/", "babyai/agent/core.py", "babyai/usbwatch.py", "babyai/portable.py", "tests/test_safety.py",
-              "tests/test_guardrails.py", "tests/test_usbwatch.py", "tests/test_portable.py", "NOTICE", "LICENSE", "capri/LICENSE.md", ".git/")
+    LOCKED = ("babyai/safety/", "babyai/agent/core.py", "babyai/usbwatch.py", "babyai/portable.py", "babyai/orchestrator/",
+              "tests/test_safety.py", "tests/test_orchestrator.py", "tests/test_guardrails.py", "tests/test_usbwatch.py",
+              "tests/test_portable.py", "NOTICE", "LICENSE", "capri/LICENSE.md", ".git/")
 
     def test_the_rules_the_gate_the_guard_rail_tests_and_the_licence_files_are_protected(self):
-        for path in ("babyai/safety/gate.py", "babyai/safety/rules.py", "babyai/safety/anything_new.py", "babyai/agent/core.py", "NOTICE", "LICENSE",
+        for path in ("babyai/safety/gate.py", "babyai/safety/rules.py", "babyai/safety/anything_new.py", "babyai/agent/core.py",
+                     "babyai/orchestrator/coordinator.py", "babyai/orchestrator/workers.py", "tests/test_orchestrator.py",
+                     "NOTICE", "LICENSE",
                      "capri/LICENSE.md", "tests/test_safety.py", "tests/test_guardrails.py", ".git/config", "BABYAI/SAFETY/rules.py",
                      "Tests/Test_Guardrails.py", "BABYAI\\USBWATCH.PY", "Tests\\Test_Portable.py", "sub/.git/hooks/pre-commit"):
             self.assertTrue(is_protected(path), path)
